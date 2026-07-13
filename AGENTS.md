@@ -16,15 +16,15 @@ Plugin component, a system-wide instruction file, or a source of runtime policy.
 - The six numbered references describe stage-specific execution; they do not define
   independent policy or register additional Skills.
 - `scripts/researchctl.py` is the only supported writer for `.research/state.json`
-  Gate and checkpoint metadata.
+  artifact, Gate, and checkpoint metadata.
 - `hooks/` may read project state and deny supported tool calls, but must never claim
   universal interception or scientific correctness.
 - A project is active only when `.research/state.json` exists and `enabled` is true.
   Outside that boundary every Hook must emit `{}`.
 
-Do not introduce `.planning/`, project-overview files, a second state format, or
-Codex-global memory. Project memory belongs only in `.research/memory.md` and is
-local to the current worktree by default.
+Do not introduce project-overview files, a second state format, or Codex-global
+memory. Project memory belongs only in `.research/memory.md` and is local to the
+current worktree by default.
 
 ## Scientific boundaries
 

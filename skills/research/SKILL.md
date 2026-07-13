@@ -17,7 +17,6 @@ Run one recoverable research workflow from project state. Keep scientific eviden
    - If `enabled` is `false`, say that it is disabled and suggest `researchctl enable`. Do not apply the staged workflow.
    - If it is invalid or incompatible, stop workflow actions and run or suggest `researchctl doctor`.
 5. Read `.research/memory.md` and only the canonical artifacts referenced by state that matter to the request. Never read or write Codex global memory for this workflow.
-6. Ignore `.planning/`; it is not part of this workflow and must not be created or required.
 
 ## Select one stage
 
@@ -36,17 +35,17 @@ Use another stage only when the request requires a direct handoff or evidence ha
 
 ## Preserve the scientific contract
 
-- Distinguish verified evidence, author interpretation, assumptions, exploratory findings, and open questions.
-- Give stable IDs to material sources, ideas, predictions, experiments, runs, analyses, claims, figures/tables, reviewer comments, and changes.
-- Version and hash mutable specifications. Bind each run to the exact method, experiment specification, code, configuration, data/environment, randomization, and outputs used.
-- Preserve failed, excluded, null, negative, and contradictory evidence with reasons. Never select only favorable runs or seeds.
-- Trace every promoted claim backward to evidence and analyses and forward to manuscript locations and reviewer replies.
-- Treat `.research/memory.md` as navigation context, never as evidence or approval authority.
-- Never fabricate citations, results, metadata, code behavior, completed checks, or human decisions.
+- Label evidence, interpretation, assumptions, exploratory findings, and unknowns; never fabricate sources, results, metadata, code behavior, checks, or decisions.
+- Give stable IDs to material research objects. Version and hash mutable specifications, and bind runs to the method, experiment specification, code, configuration, data/environment, randomization, and outputs used.
+- Preserve failed, excluded, null, negative, and contradictory evidence with reasons. Trace promoted claims backward to evidence and forward to manuscript and review artifacts.
+- Treat `.research/memory.md` only as bounded navigation context, never as evidence or approval authority.
 
 ## Update state safely
 
+- Register every material canonical artifact before a downstream handoff with `researchctl artifact register <role> --stage <stage-id> --path <file> --artifact-id <id> --version <version> [--status <status>]`. For a policy name such as `idea.idea_card`, pass `idea` to `--stage` and `idea_card` as `<role>`. Status is descriptive, defaults to `current`, and never means Gate approval. The command hashes but does not copy the file, so preserve approved versions at stable paths; never register `.research/state.json` or `.research/memory.md` as evidence.
+- Register material files directly, or retain large run/output collections through a registered registry or manifest containing stable IDs, paths, and checksums. `researchctl` verifies the registry or manifest file itself; the current stage must still verify the files it references.
 - Use `researchctl gate approve|reopen` for every Gate decision. Never edit Gate fields directly.
+- Run `researchctl doctor` to verify registered pointers and hashes before Gate approval. Gate approval separately refuses missing policy-required roles. A missing or changed historical approval file remains an audit warning; reopen the affected Gate and register the replacement at a new versioned path before reapproval.
 - Use `researchctl checkpoint` for a bounded recovery summary after material work. Add `--stage <stage-id>` only for a transition permitted by `allowed_transitions`; never edit `current_stage` directly.
 - Update `.research/memory.md` with only durable facts, decisions, failures, open questions, and the next checkpoint; point entries to canonical artifact IDs or paths.
 - Do not cross an expensive, destructive, safety-relevant, or external-action boundary without the authority required by the user and policy.

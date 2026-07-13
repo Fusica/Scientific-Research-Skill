@@ -16,7 +16,7 @@ RESEARCHCTL = ROOT / "scripts/researchctl.py"
 def policy_document() -> dict[str, object]:
     return {
         "schema_version": 1,
-        "workflow_version": "1.0.0-test",
+        "workflow_version": "1.1.0-test",
         "stage_order": [
             "idea",
             "literature",
@@ -31,20 +31,66 @@ def policy_document() -> dict[str, object]:
             "claim_freeze",
             "release",
         ],
-        "state_contract": {},
+        "state_contract": {
+            "artifact_pointer_fields": [
+                "path",
+                "artifact_id",
+                "version",
+                "content_hash",
+                "status",
+            ]
+        },
         "gates": {
-            "idea_freeze": {"advance_to": "method", "reopen_to": "idea"},
+            "idea_freeze": {
+                "advance_to": "method",
+                "reopen_to": "idea",
+                "required_artifact_roles": [
+                    "idea.idea_card",
+                    "literature.evidence_base",
+                ],
+            },
             "method_experiment_approval": {
                 "advance_to": "experiment_results",
                 "reopen_to": "method",
+                "required_artifact_roles": ["method.approval_package"],
             },
             "claim_freeze": {
                 "advance_to": "paper",
                 "reopen_to": "experiment_results",
+                "required_artifact_roles": [
+                    "experiment_results.experiment_matrix",
+                    "experiment_results.run_registry",
+                    "experiment_results.decision_log",
+                    "experiment_results.analysis_registry",
+                    "experiment_results.artifact_manifest",
+                    "experiment_results.claim_ledger",
+                ],
             },
             "release": {
                 "advance_to": "revision",
                 "release_targets": ["initial_submission", "revision_rebuttal"],
+                "required_artifact_roles_by_target": {
+                    "initial_submission": [
+                        "paper.manuscript",
+                        "paper.claim_map",
+                        "paper.change_map",
+                        "paper.bibliography_provenance",
+                        "paper.compilation_log",
+                        "paper.rendered_output",
+                        "paper.render_inspection_record",
+                        "paper.submission_checklist",
+                    ],
+                    "revision_rebuttal": [
+                        "revision.revised_manuscript",
+                        "revision.review_map",
+                        "revision.change_log",
+                        "revision.response_document",
+                        "revision.manuscript_diff",
+                        "revision.verification_records",
+                        "revision.rendered_output",
+                        "revision.release_checklist",
+                    ],
+                },
             },
         },
         "allowed_transitions": {
@@ -131,6 +177,56 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.load_state()
 
+    def register_artifact(
+        self,
+        role_reference: str,
+        *,
+        artifact_id: str | None = None,
+        version: str = "1",
+        status: str = "approval-ready",
+        content: str | None = None,
+        path: Path | None = None,
+    ) -> dict[str, object]:
+        stage, role = role_reference.split(".", 1)
+        identifier = artifact_id or f"{stage}-{role}-001".upper().replace("_", "-")
+        candidate = path or (
+            self.project / "artifacts" / f"{stage}-{role}-v{version}.md"
+        )
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text(
+            content or f"# {role_reference} {identifier}@{version}\n",
+            encoding="utf-8",
+        )
+        result = self.run_ctl(
+            "artifact",
+            "register",
+            role,
+            "--stage",
+            stage,
+            "--path",
+            str(candidate),
+            "--artifact-id",
+            identifier,
+            "--version",
+            version,
+            "--status",
+            status,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.load_state()["artifacts"][stage][role][identifier]
+
+    def register_gate_artifacts(
+        self, gate: str, *, release_target: str | None = None
+    ) -> None:
+        policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        spec = policy["gates"][gate]
+        if gate == "release":
+            roles = spec["required_artifact_roles_by_target"][release_target]
+        else:
+            roles = spec["required_artifact_roles"]
+        for role in roles:
+            self.register_artifact(role)
+
     def test_init_is_idempotent_preserves_memory_and_sets_local_exclude(self) -> None:
         original_state = self.initialize()
         memory = self.project / ".research/memory.md"
@@ -195,23 +291,208 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(enabled.returncode, 2)
         self.assertIn("workflow_version does not match", enabled.stderr)
 
-    def test_gate_decisions_keep_history_and_use_policy_stage_advance(self) -> None:
+    def test_artifact_register_hashes_files_and_is_idempotent(self) -> None:
+        self.initialize()
+        path = self.project / "artifacts/idea-card-v1.md"
+        pointer = self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-001",
+            path=path,
+            content="# Frozen idea v1\n",
+        )
+        self.assertEqual(pointer["path"], "artifacts/idea-card-v1.md")
+        self.assertEqual(pointer["artifact_id"], "IDEA-CARD-001")
+        self.assertEqual(pointer["version"], "1")
+        self.assertEqual(pointer["status"], "approval-ready")
+        self.assertRegex(pointer["content_hash"], r"^sha256:[0-9a-f]{64}$")
+
+        repeated = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(path),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "1",
+            "--status",
+            "approval-ready",
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertIn("already registered", repeated.stdout)
+
+        conflicting = self.project / "artifacts/conflicting-v1.md"
+        conflicting.write_text("different content\n", encoding="utf-8")
+        rejected = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(conflicting),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "1",
+            "--status",
+            "approval-ready",
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("use a new version", rejected.stderr)
+        self.assertEqual(
+            self.load_state()["artifacts"]["idea"]["idea_card"]["IDEA-CARD-001"],
+            pointer,
+        )
+
+    def test_artifact_register_defaults_status_and_rejects_control_metadata(self) -> None:
         self.initialize()
         artifact = self.project / "artifacts/idea-card.md"
-        artifact.parent.mkdir()
-        artifact.write_text("# Frozen idea\n", encoding="utf-8")
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("# Idea\n", encoding="utf-8")
+        registered = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(artifact),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "1",
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        pointer = self.load_state()["artifacts"]["idea"]["idea_card"][
+            "IDEA-CARD-001"
+        ]
+        self.assertEqual(pointer["status"], "current")
+
+        for candidate in (
+            self.project / ".research/state.json",
+            self.project / ".research/memory.md",
+        ):
+            rejected = self.run_ctl(
+                "artifact",
+                "register",
+                "evidence_base",
+                "--stage",
+                "literature",
+                "--path",
+                str(candidate),
+                "--artifact-id",
+                "EVIDENCE-001",
+                "--version",
+                "1",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("control metadata cannot be registered", rejected.stderr)
+
+    def test_artifact_register_conservatively_upgrades_legacy_containers(self) -> None:
+        self.initialize()
+        legacy = self.project / "artifacts/legacy-note.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("legacy\n", encoding="utf-8")
         state_path = self.project / ".research/state.json"
         state = self.load_state()
-        state["artifacts"] = {
-            "idea_card": {
-                "path": "artifacts/idea-card.md",
-                "artifact_id": "IDEA-CARD-001",
-                "version": 1,
-                "content_hash": "sha256:test",
-                "status": "approval-ready",
-            }
-        }
+        state["artifacts"] = ["artifacts/legacy-note.md"]
         state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+        pointer = self.register_artifact("idea.idea_card")
+        state = self.load_state()
+        self.assertEqual(
+            state["artifacts"]["idea"]["idea_card"][pointer["artifact_id"]],
+            pointer,
+        )
+        self.assertEqual(
+            state["artifacts"]["_legacy"]["artifacts"],
+            ["artifacts/legacy-note.md"],
+        )
+
+        state["artifacts"] = {"idea": {"idea_card": pointer}}
+        state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+        upgraded = self.register_artifact(
+            "idea.idea_card",
+            artifact_id=str(pointer["artifact_id"]),
+            version="2",
+            content="# Updated idea\n",
+        )
+        self.assertEqual(upgraded["version"], "2")
+        self.assertNotIn("path", self.load_state()["artifacts"]["idea"]["idea_card"])
+
+    def test_artifact_register_rejects_missing_and_directory_paths(self) -> None:
+        self.initialize()
+        missing = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--path",
+            "artifacts/missing.md",
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "1",
+            "--status",
+            "draft",
+        )
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("cannot be resolved", missing.stderr)
+
+        directory = self.project / "artifacts/directory"
+        directory.mkdir(parents=True)
+        rejected = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--path",
+            str(directory),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "1",
+            "--status",
+            "draft",
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("regular file", rejected.stderr)
+        self.assertEqual(self.load_state()["artifacts"], {})
+
+    def test_gate_requires_complete_current_hash_verified_roles(self) -> None:
+        self.initialize()
+        missing = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Ready"
+        )
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("missing required artifact role idea.idea_card", missing.stderr)
+
+        self.register_artifact("idea.idea_card")
+        partial = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Ready"
+        )
+        self.assertEqual(partial.returncode, 2)
+        self.assertIn(
+            "missing required artifact role literature.evidence_base", partial.stderr
+        )
+
+        self.register_artifact("literature.evidence_base")
+        idea_path = self.project / "artifacts/idea-idea_card-v1.md"
+        idea_path.write_text("tampered after registration\n", encoding="utf-8")
+        stale = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Ready"
+        )
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("hash mismatch", stale.stderr)
+        self.assertEqual(
+            self.load_state()["gates"]["idea_freeze"]["status"], "pending"
+        )
+
+    def test_gate_decisions_keep_history_and_use_policy_stage_advance(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
 
         approved = self.run_ctl(
             "gate", "approve", "idea_freeze", "--reason", "Evidence package reviewed"
@@ -226,18 +507,14 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(decision["reason"], "Evidence package reviewed")
         self.assertEqual(decision["actor"], "unit-test-researcher")
         self.assertEqual(
-            decision["artifact_refs"],
-            [
-                {
-                    "label": "artifacts.idea_card",
-                    "path": "artifacts/idea-card.md",
-                    "artifact_id": "IDEA-CARD-001",
-                    "version": 1,
-                    "content_hash": "sha256:test",
-                    "status": "approval-ready",
-                }
-            ],
+            {reference["label"] for reference in decision["artifact_refs"]},
+            {
+                "artifacts.idea.idea_card.IDEA-IDEA-CARD-001",
+                "artifacts.literature.evidence_base.LITERATURE-EVIDENCE-BASE-001",
+            },
         )
+        for reference in decision["artifact_refs"]:
+            self.assertRegex(reference["content_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(record["latest_decision_id"], decision["decision_id"])
         self.assertEqual(state["current_stage"], "method")
         self.assertEqual(state["stage_history"][0]["from_stage"], "idea")
@@ -252,7 +529,127 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(len(record["history"]), 2)
         self.assertEqual(record["history"][-1]["previous_status"], "approved")
         self.assertEqual(record["history"][-1]["new_status"], "reopened")
+        self.assertEqual(
+            record["history"][-1]["artifact_refs"],
+            record["history"][0]["artifact_refs"],
+        )
         self.assertEqual(self.load_state()["current_stage"], "idea")
+
+    def test_new_artifact_version_preserves_gate_history_and_tamper_is_detected(
+        self,
+    ) -> None:
+        self.initialize()
+        first_path = self.project / "artifacts/idea-card-v1.md"
+        self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-001",
+            version="1",
+            path=first_path,
+            content="# Idea v1\n",
+        )
+        self.register_artifact("literature.evidence_base")
+        approved_v1 = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Approve v1"
+        )
+        self.assertEqual(approved_v1.returncode, 0, approved_v1.stderr)
+        first_decision = self.load_state()["gates"]["idea_freeze"]["history"][0]
+        first_reference = next(
+            reference
+            for reference in first_decision["artifact_refs"]
+            if reference["artifact_id"] == "IDEA-CARD-001"
+        )
+
+        blocked_path = self.project / "artifacts/idea-card-blocked-v2.md"
+        blocked_path.write_text("# Blocked idea v2\n", encoding="utf-8")
+        frozen = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(blocked_path),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "2",
+            "--status",
+            "approval-ready",
+        )
+        self.assertEqual(frozen.returncode, 2)
+        self.assertIn("reopen that Gate", frozen.stderr)
+
+        reopened = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "Idea changed"
+        )
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        first_path.write_text("# Attempted in-place v2\n", encoding="utf-8")
+        reused = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(first_path),
+            "--artifact-id",
+            "IDEA-CARD-001",
+            "--version",
+            "2",
+            "--status",
+            "approval-ready",
+        )
+        self.assertEqual(reused.returncode, 2)
+        self.assertIn("new version at a new path", reused.stderr)
+        first_path.write_text("# Idea v1\n", encoding="utf-8")
+        second_path = self.project / "artifacts/idea-card-v2.md"
+        self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-001",
+            version="2",
+            path=second_path,
+            content="# Idea v2\n",
+        )
+        approved_v2 = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Approve v2"
+        )
+        self.assertEqual(approved_v2.returncode, 0, approved_v2.stderr)
+        history = self.load_state()["gates"]["idea_freeze"]["history"]
+        latest_reference = next(
+            reference
+            for reference in history[-1]["artifact_refs"]
+            if reference["artifact_id"] == "IDEA-CARD-001"
+        )
+        self.assertEqual(first_reference["version"], "1")
+        self.assertEqual(first_reference["path"], "artifacts/idea-card-v1.md")
+        self.assertEqual(latest_reference["version"], "2")
+        self.assertEqual(latest_reference["path"], "artifacts/idea-card-v2.md")
+
+        first_path.write_text("overwrote approved v1\n", encoding="utf-8")
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertIn("historical Gate artifact is no longer verifiable", doctor.stdout)
+        self.assertIn("hash mismatch", doctor.stdout)
+        recoverable = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "Approved file changed"
+        )
+        self.assertEqual(recoverable.returncode, 0, recoverable.stderr)
+
+        third_path = self.project / "artifacts/idea-card-v3.md"
+        self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-001",
+            version="3",
+            path=third_path,
+            content="# Idea v3 after historical loss\n",
+        )
+        approved_v3 = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "Approve recoverable v3"
+        )
+        self.assertEqual(approved_v3.returncode, 0, approved_v3.stderr)
+        audit = self.run_ctl("doctor")
+        self.assertEqual(audit.returncode, 0, audit.stdout + audit.stderr)
+        self.assertIn("historical Gate artifact is no longer verifiable", audit.stdout)
 
     def test_gate_rejects_empty_reason_and_invalid_reopen(self) -> None:
         self.initialize()
@@ -329,11 +726,15 @@ class ResearchCtlTest(unittest.TestCase):
             "method_experiment_approval",
             "claim_freeze",
         ):
+            self.register_gate_artifacts(gate)
             result = self.run_ctl(
                 "gate", "approve", gate, "--reason", f"Approved evidence for {gate}"
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+        self.register_gate_artifacts(
+            "release", release_target="initial_submission"
+        )
         initial = self.run_ctl(
             "gate", "approve", "release", "--reason", "Submission package verified"
         )
@@ -354,6 +755,9 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(reopened_initial.returncode, 0, reopened_initial.stderr)
         self.assertEqual(self.load_state()["current_stage"], "revision")
 
+        self.register_gate_artifacts(
+            "release", release_target="revision_rebuttal"
+        )
         rebuttal = self.run_ctl(
             "gate", "approve", "release", "--reason", "Rebuttal package verified"
         )
@@ -372,6 +776,7 @@ class ResearchCtlTest(unittest.TestCase):
     def test_upstream_gate_must_be_reopened_in_reverse_order(self) -> None:
         self.initialize()
         for gate in ("idea_freeze", "method_experiment_approval"):
+            self.register_gate_artifacts(gate)
             result = self.run_ctl(
                 "gate", "approve", gate, "--reason", f"Approved {gate}"
             )
@@ -431,7 +836,7 @@ class ResearchCtlTest(unittest.TestCase):
             result.stdout,
         )
 
-    def test_doctor_rejects_artifact_metadata_without_a_path(self) -> None:
+    def test_doctor_warns_for_legacy_artifact_metadata_without_a_path(self) -> None:
         self.initialize()
         state_path = self.project / ".research/state.json"
         state = self.load_state()
@@ -442,9 +847,10 @@ class ResearchCtlTest(unittest.TestCase):
 
         result = self.run_ctl("doctor")
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
-            "artifacts.idea_card is not a valid artifact path", result.stdout
+            "legacy artifact pointer: artifacts.idea_card is not a valid artifact path",
+            result.stdout,
         )
 
     def test_doctor_reports_missing_clone_local_exclusion(self) -> None:

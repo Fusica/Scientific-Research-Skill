@@ -9,7 +9,7 @@
             "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" SessionStart",
             "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" SessionStart",
             "timeout": 5,
-            "statusMessage": "Loading bounded research project context..."
+            "statusMessage": "Loading the active research boundary..."
           }
         ]
       }
@@ -22,7 +22,7 @@
             "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" UserPromptSubmit",
             "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" UserPromptSubmit",
             "timeout": 5,
-            "statusMessage": "Applying the active research-stage contract..."
+            "statusMessage": "Routing the active-project prompt..."
           }
         ]
       }
@@ -63,7 +63,7 @@
             "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" Stop",
             "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" Stop",
             "timeout": 5,
-            "statusMessage": "Running the one-pass research semantic audit..."
+            "statusMessage": "Checking whether a research audit is needed..."
           }
         ]
       }

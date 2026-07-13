@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -249,8 +250,10 @@ test("all inactive Hook events are read-only and create no plugin data", () => {
   cleanup(fixture.temporary);
 });
 
-test("SessionStart finds a parent project and injects bounded state and memory", () => {
+test("SessionStart finds a parent project and injects only the minimal activation boundary", () => {
   const existingArtifact = "evidence/idea-card.md";
+  const artifactContent = "# Idea card\n";
+  const artifactHash = `sha256:${crypto.createHash("sha256").update(artifactContent).digest("hex")}`;
   const memory = [
     "# Research Memory",
     "",
@@ -265,11 +268,23 @@ test("SessionStart finds a parent project and injects bounded state and memory",
     "- Next smallest action: verify the tail survives bounded injection.",
   ].join("\n");
   const state = makeState({
-    artifacts: { idea_card: { path: existingArtifact } },
+    artifacts: {
+      idea: {
+        idea_card: {
+          "IDEA-CARD-001": {
+            path: existingArtifact,
+            artifact_id: "IDEA-CARD-001",
+            version: "1",
+            content_hash: artifactHash,
+            status: "approval-ready",
+          },
+        },
+      },
+    },
     last_checkpoint: { summary: "Inspect exact Hook JSON", timestamp: "2026-07-13T08:10:00Z" },
   });
   const fixture = createProject({ state, memory });
-  write(path.join(fixture.project, existingArtifact), "# Idea card\n");
+  write(path.join(fixture.project, existingArtifact), artifactContent);
   const nested = path.join(fixture.project, "src", "deep");
   fs.mkdirSync(nested, { recursive: true });
 
@@ -278,16 +293,17 @@ test("SessionStart finds a parent project and injects bounded state and memory",
   assert.deepEqual(Object.keys(output), ["hookSpecificOutput"]);
   assert.equal(output.hookSpecificOutput.hookEventName, "SessionStart");
   const context = output.hookSpecificOutput.additionalContext;
-  assert.ok(context.length <= 7600, `context length was ${context.length}`);
+  assert.ok(context.length <= 800, `context length was ${context.length}`);
+  assert.match(context, /Project: hook-test-project/);
   assert.match(context, /Project ID: PROJECT-HOOK-TEST/);
   assert.match(context, /Current stage: idea/);
-  assert.match(context, /idea_freeze: pending/);
-  assert.match(context, /evidence\/idea-card\.md/);
-  assert.match(context, /Inspect exact Hook JSON/);
-  assert.match(context, /memory\.md is bounded navigation memory, never scientific evidence/);
-  assert.match(context, /Hook coverage boundary/);
-  assert.match(context, /bounded by research hook/);
-  assert.match(context, /verify the tail survives bounded injection/);
+  assert.match(context, /Gate to exit: idea_freeze \(pending\)/);
+  assert.match(context, /state\.json is the project state authority/);
+  assert.match(context, /Mechanical Hook checks remain active/);
+  assert.doesNotMatch(context, /evidence\/idea-card\.md/);
+  assert.doesNotMatch(context, /IDEA-CARD-001@1/);
+  assert.doesNotMatch(context, /Inspect exact Hook JSON/);
+  assert.doesNotMatch(context, /verify the tail survives bounded injection/);
   assert.deepEqual(snapshotFiles(fixture.project), before, "SessionStart must be read-only");
   cleanup(fixture.temporary);
 });
@@ -309,7 +325,7 @@ test("SessionStart resolves CODEX_PLUGIN_ROOT and CLAUDE_PLUGIN_ROOT fallbacks",
   cleanup(fixture.temporary);
 });
 
-test("UserPromptSubmit injects the canonical current-stage contract", () => {
+test("UserPromptSubmit injects a compact current-stage boundary for research work", () => {
   const gates = Object.fromEntries(policy.gate_order.map((gate) => [gate, pendingGate()]));
   gates.idea_freeze = approvedGate("DEC-IDEA");
   gates.method_experiment_approval = approvedGate("DEC-METHOD");
@@ -322,13 +338,63 @@ test("UserPromptSubmit injects the canonical current-stage contract", () => {
   assert.deepEqual(Object.keys(output), ["hookSpecificOutput"]);
   assert.equal(output.hookSpecificOutput.hookEventName, "UserPromptSubmit");
   const context = output.hookSpecificOutput.additionalContext;
-  assert.ok(context.length <= 5600);
+  assert.ok(context.length <= 1200);
   assert.match(context, /Current stage: experiment_results/);
-  assert.match(context, /run integrity checks and baselines/);
-  assert.match(context, /complete run registry/);
-  assert.match(context, /human approves claim_freeze/);
-  assert.match(context, /select favorable seeds or silently replace failed runs/);
+  assert.match(context, /PROMPT RELEVANT/);
+  assert.match(context, /Current-stage prohibited actions/);
+  assert.match(context, /change metrics or exclusions after seeing results/);
   assert.match(context, /claim_freeze \(pending\)/);
+  assert.match(context, /Use the \$research Skill/);
+  cleanup(fixture.temporary);
+});
+
+test("UserPromptSubmit skips stage context for clear English and Chinese code-only work", () => {
+  const fixture = createProject();
+  const prompts = [
+    "Refactor this parser function and run its unit tests.",
+    "Refactor the experiment script without changing its behavior.",
+    "Optimize the training code and keep the public API stable.",
+    "Explain the loss function implementation in this module.",
+    "Refactor paper_generator.py without changing its output format.",
+    "Analyze the map function implementation and simplify the callback logic.",
+    "Improve the accuracy calculation in metrics.py.",
+    "解释一下这个函数的代码逻辑，顺便修复报错。",
+    "重构实验脚本，运行单元测试，但不要修改算法逻辑。",
+    "优化训练代码，并解释损失函数实现。",
+    "重构论文生成脚本，但不要改变输出格式。",
+    "分析实验结果解析函数的代码并修复 bug。",
+  ];
+  for (const prompt of prompts) {
+    assert.deepEqual(runHook("UserPromptSubmit", fixture.project, { prompt }), {}, prompt);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("UserPromptSubmit treats mixed code and research work conservatively", () => {
+  const fixture = createProject();
+  const output = runHook("UserPromptSubmit", fixture.project, {
+    prompt: "Refactor the analysis code, then verify the experiment results and paper claim.",
+  });
+  assert.equal(output.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  assert.match(output.hookSpecificOutput.additionalContext, /PROMPT RELEVANT/);
+
+  const unclear = runHook("UserPromptSubmit", fixture.project, {
+    prompt: "Please continue with the next task.",
+  });
+  assert.equal(unclear.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+
+  const paperWork = runHook("UserPromptSubmit", fixture.project, {
+    prompt: "重构论文的论证结构，并核验核心主张。",
+  });
+  assert.equal(paperWork.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+
+  for (const prompt of [
+    "Review the code and summarize the paper findings.",
+    "解释这段代码，然后总结论文结论。",
+  ]) {
+    const mixed = runHook("UserPromptSubmit", fixture.project, { prompt });
+    assert.equal(mixed.hookSpecificOutput.hookEventName, "UserPromptSubmit", prompt);
+  }
   cleanup(fixture.temporary);
 });
 
@@ -384,6 +450,12 @@ test("PreToolUse blocks direct state edits but permits reads and researchctl", (
       command: "python3 /plugin/scripts/researchctl.py gate approve idea_freeze --reason 'Human approved the frozen idea.'",
     },
   }), {});
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: {
+      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path artifacts/idea.md --artifact-id IDEA-1 --version 1 --status ready",
+    },
+  }), {});
 
   assert.deepEqual(runHook("PreToolUse", fixture.project, {
     tool_name: "apply_patch",
@@ -399,6 +471,27 @@ test("PreToolUse blocks direct state edits but permits reads and researchctl", (
     },
   });
   assert.equal(chainedBypass.hookSpecificOutput.permissionDecision, "deny");
+
+  for (const command of [
+    "cd .research && sed -i '' 's/pending/approved/' state.json",
+    "cd .research && rm state.json",
+    "cd -- .research && rm state.json",
+  ]) {
+    const relativeBypass = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(relativeBypass.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "cd .research && cat state.json" },
+  }), {});
+  const workdirBypass = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "rm state.json", workdir: ".research" },
+  });
+  assert.equal(workdirBypass.hookSpecificOutput.permissionDecision, "deny");
   cleanup(fixture.temporary);
 });
 
@@ -537,6 +630,50 @@ test("PostToolUse validates touched state and artifact pointers with exact outpu
   cleanup(fixture.temporary);
 });
 
+test("PostToolUse recognizes researchctl artifact registration as a state mutation", () => {
+  const fixture = createProject();
+  const output = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: {
+      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path artifacts/idea.md --artifact-id IDEA-1 --version 1 --status ready",
+    },
+    tool_response: { stdout: "registered artifact", exit_code: 0 },
+  });
+  assert.equal(output.hookSpecificOutput.hookEventName, "PostToolUse");
+  assert.match(output.hookSpecificOutput.additionalContext, /Schema and Gate invariants: valid/);
+  cleanup(fixture.temporary);
+});
+
+test("PostToolUse rejects research control metadata as a canonical artifact", () => {
+  const fixture = createProject({
+    state: makeState({
+      artifacts: {
+        idea: {
+          idea_card: {
+            "IDEA-1": {
+              path: ".research/memory.md",
+              artifact_id: "IDEA-1",
+              version: "1",
+              content_hash: `sha256:${"0".repeat(64)}`,
+              status: "current",
+            },
+          },
+        },
+      },
+    }),
+  });
+  const output = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "python3 /plugin/scripts/researchctl.py status" },
+    tool_response: { exit_code: 0 },
+  });
+  assert.match(
+    output.hookSpecificOutput.additionalContext,
+    /research control metadata, which cannot be evidence/,
+  );
+  cleanup(fixture.temporary);
+});
+
 test("PostToolUse reports schema and Gate violations after a touched state", () => {
   const fixture = createProject({
     state: makeState({ current_stage: "method", stage_history: "invalid" }),
@@ -586,22 +723,58 @@ test("Stop blocks once for a material semantic audit and emits the exact release
   });
   assert.deepEqual(Object.keys(output).sort(), ["decision", "reason"]);
   assert.equal(output.decision, "block");
-  assert.ok(output.reason.length <= 6200);
+  assert.ok(output.reason.length <= 1800);
   assert.match(output.reason, /single stop-time semantic audit/);
-  assert.match(output.reason, /claim-evidence alignment/);
-  assert.match(output.reason, /promised-but-unperformed verification/);
-  assert.match(output.reason, /Active-stage exit criteria/);
-  assert.match(output.reason, /idea_freeze: pending/);
+  assert.match(output.reason, /applicable policy invariants/);
+  assert.match(output.reason, /Claims, numbers, artifacts/);
+  assert.match(output.reason, /Claim scope and certainty/);
+  assert.match(output.reason, /Gate to exit: idea_freeze \(pending\)/);
   cleanup(fixture.temporary);
 });
 
-test("Stop audits every first stop and never loops when already active", () => {
+test("Stop skips ordinary answers and never loops when already active", () => {
   const fixture = createProject();
-  const first = runHook("Stop", fixture.project, {
+  assert.deepEqual(runHook("Stop", fixture.project, {
     last_assistant_message: "好的。",
     stop_hook_active: false,
-  });
-  assert.equal(first.decision, "block");
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "Refactored the parser, simplified its control flow, and all unit tests pass.",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "已经解释了函数细节并修复代码报错，单元测试通过。",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "已重构实验脚本，单元测试通过，未改变算法逻辑。",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "The experiment script refactor is complete and all unit tests pass.",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "The loss function implementation is complete and its unit tests pass.",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "The map function implementation improved and its unit tests pass.",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "论文生成脚本已更新，单元测试通过。",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "The manuscript parser is ready and all unit tests pass.",
+    stop_hook_active: false,
+  }), {});
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "The researchctl parser was updated and its tests pass.",
+    stop_hook_active: false,
+  }), {});
+
   assert.deepEqual(runHook("Stop", fixture.project, {
     last_assistant_message: "结果已经完成并验证，准确率提升 12%。",
     stop_hook_active: true,
@@ -613,6 +786,29 @@ test("Stop audits every first stop and never loops when already active", () => {
   delete camelInput.stop_hook_active;
   camelInput.stopHookActive = true;
   assert.deepEqual(runHook("Stop", fixture.project, {}, { input: camelInput }), {});
+  cleanup(fixture.temporary);
+});
+
+test("Stop audits research deliverables and Gate claims", () => {
+  const fixture = createProject();
+  for (const last_assistant_message of [
+    "mAP improved by 2.3%, which supports the central claim.",
+    "The claim ledger is completed and the release Gate is approved.",
+    "The paper was revised.",
+    "The paper parser is ready, and the paper itself was revised.",
+    "I edited the manuscript after checking its citations.",
+    "Our method outperforms the baseline.",
+    "The benchmark shows our method is significantly better.",
+    "论文已修改，审稿回复已准备完成。",
+    "论文已经重写，引用也已核验。",
+    "基准结果表明我们的方法显著更好。",
+  ]) {
+    const output = runHook("Stop", fixture.project, {
+      last_assistant_message,
+      stop_hook_active: false,
+    });
+    assert.equal(output.decision, "block", last_assistant_message);
+  }
   cleanup(fixture.temporary);
 });
 

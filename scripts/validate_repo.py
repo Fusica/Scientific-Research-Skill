@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 SCHEMA_VERSION = "1.0"
 
 STAGES = [
@@ -226,6 +226,19 @@ def validate_skill() -> list[str]:
         errors.append("policy.yaml: schema_version mismatch")
     if policy.get("workflow_version") != PLUGIN_VERSION:
         errors.append("policy.yaml: workflow_version must match plugin version")
+    state_contract = require_mapping(
+        policy.get("state_contract"), "policy.yaml state_contract", errors
+    )
+    if state_contract.get("artifact_pointer_fields") != [
+        "path",
+        "artifact_id",
+        "version",
+        "content_hash",
+        "status",
+    ]:
+        errors.append(
+            "policy.yaml: artifact_pointer_fields must match the canonical pointer"
+        )
     if policy.get("stage_order") != STAGES:
         errors.append("policy.yaml: stage_order must contain the six canonical stages")
     if policy.get("gate_order") != GATES:
@@ -283,6 +296,37 @@ def validate_skill() -> list[str]:
                 errors.append(
                     f"policy.yaml gate {gate_id}: {field} must be a non-empty string list"
                 )
+        if gate_id == "release":
+            targets = spec.get("release_targets")
+            role_mapping = spec.get("required_artifact_roles_by_target")
+            if not isinstance(targets, list) or not isinstance(role_mapping, dict):
+                errors.append(
+                    "policy.yaml release: artifact roles must be mapped by target"
+                )
+                role_lists: list[Any] = []
+            else:
+                if set(role_mapping) != set(targets):
+                    errors.append(
+                        "policy.yaml release: artifact role targets do not match release_targets"
+                    )
+                role_lists = list(role_mapping.values())
+        else:
+            role_lists = [spec.get("required_artifact_roles")]
+        for roles in role_lists:
+            if not isinstance(roles, list) or not roles or not all(
+                isinstance(role, str)
+                and re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", role)
+                for role in roles
+            ):
+                errors.append(
+                    f"policy.yaml gate {gate_id}: invalid required artifact roles"
+                )
+                continue
+            for role in roles:
+                if role.split(".", 1)[0] not in STAGES:
+                    errors.append(
+                        f"policy.yaml gate {gate_id}: artifact role has unknown stage {role}"
+                    )
     if policy.get("allowed_transitions") != EXPECTED_TRANSITIONS:
         errors.append("policy.yaml: allowed_transitions must match the six-stage Gate map")
     audit = policy.get("semantic_audit")
@@ -437,7 +481,7 @@ def main() -> int:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(
-        "Validated scientific-research-skill 1.0.0: one Skill, six stages, "
+        "Validated scientific-research-skill 1.1.0: one Skill, six stages, "
         "four Gates, project-local state, five Hook events, and link-only external references."
     )
     return 0

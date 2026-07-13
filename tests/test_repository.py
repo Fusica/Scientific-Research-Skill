@@ -70,6 +70,30 @@ class RepositoryTest(unittest.TestCase):
             policy["gates"]["method_experiment_approval"]["advance_to"],
             "experiment_results",
         )
+        self.assertTrue(
+            {
+                "experiment_results.experiment_matrix",
+                "experiment_results.run_registry",
+                "experiment_results.decision_log",
+                "experiment_results.analysis_registry",
+                "experiment_results.artifact_manifest",
+                "experiment_results.claim_ledger",
+            }.issubset(policy["gates"]["claim_freeze"]["required_artifact_roles"])
+        )
+        release_roles = policy["gates"]["release"][
+            "required_artifact_roles_by_target"
+        ]
+        self.assertIn("paper.rendered_output", release_roles["initial_submission"])
+        self.assertTrue(
+            {
+                "revision.review_map",
+                "revision.change_log",
+                "revision.response_document",
+                "revision.manuscript_diff",
+                "revision.verification_records",
+                "revision.rendered_output",
+            }.issubset(release_roles["revision_rebuttal"])
+        )
 
     def test_state_and_memory_templates_are_project_local_contract(self) -> None:
         state = json.loads(
@@ -94,7 +118,7 @@ class RepositoryTest(unittest.TestCase):
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
         entry = marketplace["plugins"][0]
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.1.0")
         self.assertEqual(entry["name"], manifest["name"])
         self.assertEqual(entry["version"], manifest["version"])
         self.assertEqual(entry["source"], {"source": "local", "path": "."})
@@ -110,7 +134,16 @@ class RepositoryTest(unittest.TestCase):
     def test_researchctl_has_all_public_commands(self) -> None:
         result = self.run_python("scripts/researchctl.py", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ("init", "status", "enable", "disable", "gate", "checkpoint", "doctor"):
+        for command in (
+            "init",
+            "status",
+            "enable",
+            "disable",
+            "artifact",
+            "gate",
+            "checkpoint",
+            "doctor",
+        ):
             self.assertIn(command, result.stdout)
 
     def test_root_license_and_external_references_remain_link_only(self) -> None:
