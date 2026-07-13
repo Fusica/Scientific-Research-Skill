@@ -1,4 +1,0 @@
-interface:
-  display_name: "Literature Evidence"
-  short_description: "Build traceable literature and novelty evidence"
-  default_prompt: "Use $literature-evidence to build a reproducible evidence matrix and assess the closest prior work for this idea."

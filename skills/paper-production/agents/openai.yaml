@@ -1,4 +1,0 @@
-interface:
-  display_name: "Paper Production"
-  short_description: "Draft traceable papers from approved research claims"
-  default_prompt: "Use $paper-production to draft or revise the paper from the approved claim ledger and evidence artifacts."

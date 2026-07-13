@@ -1,0 +1,240 @@
+{
+  "schema_version": "1.0",
+  "workflow_version": "1.0.0",
+  "stage_order": [
+    "idea",
+    "literature",
+    "method",
+    "experiment_results",
+    "paper",
+    "revision"
+  ],
+  "gate_order": [
+    "idea_freeze",
+    "method_experiment_approval",
+    "claim_freeze",
+    "release"
+  ],
+  "state_contract": {
+    "required_fields": [
+      "schema_version",
+      "workflow_version",
+      "enabled",
+      "project_id",
+      "current_stage",
+      "gates",
+      "artifacts",
+      "last_checkpoint"
+    ],
+    "stage_ids": [
+      "idea",
+      "literature",
+      "method",
+      "experiment_results",
+      "paper",
+      "revision"
+    ],
+    "gate_ids": [
+      "idea_freeze",
+      "method_experiment_approval",
+      "claim_freeze",
+      "release"
+    ],
+    "gate_statuses": ["pending", "approved", "reopened"],
+    "gate_actions": ["approve", "reopen"],
+    "artifact_pointer_fields": ["path", "artifact_id", "version", "content_hash", "status"]
+  },
+  "gates": {
+    "idea_freeze": {
+      "label": "Idea freeze",
+      "requires_gates": [],
+      "required_for": ["method"],
+      "advance_to": "method",
+      "reopen_to": "idea",
+      "approval_requires": [
+        "one falsifiable idea with a stable ID and version",
+        "closest-work evidence and smallest defensible difference",
+        "feasibility, risks, predictions, and kill criteria",
+        "explicit human approval with artifact references"
+      ],
+      "reopen_when_changed": [
+        "central mechanism or contribution changes",
+        "closer prior work removes the stated difference",
+        "feasibility or falsifiability changes materially"
+      ]
+    },
+    "method_experiment_approval": {
+      "label": "Method and experiment approval",
+      "requires_gates": ["idea_freeze"],
+      "required_stage": "method",
+      "required_for": ["experiment_results"],
+      "advance_to": "experiment_results",
+      "reopen_to": "method",
+      "approval_requires": [
+        "versioned method contract with assumptions and interfaces",
+        "prediction-to-experiment mapping",
+        "baselines, metrics, statistical unit, resources, and safety constraints",
+        "explicit human approval with artifact references"
+      ],
+      "reopen_when_changed": [
+        "central objective, assumption, module, or evaluation contract changes",
+        "experiment design no longer tests the approved predictions",
+        "resource or safety constraints invalidate the approved plan"
+      ]
+    },
+    "claim_freeze": {
+      "label": "Claim freeze",
+      "requires_gates": ["method_experiment_approval"],
+      "required_stage": "experiment_results",
+      "required_for": ["paper"],
+      "advance_to": "paper",
+      "reopen_to": "experiment_results",
+      "approval_requires": [
+        "audited run population and analysis provenance",
+        "claim ledger with calibrated wording and limitations",
+        "negative, null, excluded, and contradictory outcomes retained",
+        "explicit human approval with artifact references"
+      ],
+      "reopen_when_changed": [
+        "included runs, statistical unit, estimand, or analysis changes materially",
+        "new evidence weakens or contradicts a frozen claim",
+        "manuscript needs a stronger claim than the ledger permits"
+      ]
+    },
+    "release": {
+      "label": "External release",
+      "requires_gates": ["claim_freeze"],
+      "required_for": ["revision", "external_submission", "reviewer_response"],
+      "advance_to": "revision",
+      "release_targets": ["initial_submission", "revision_rebuttal"],
+      "approval_requires": [
+        "release artifact paths and content hashes",
+        "all promised checks completed and rendered output inspected",
+        "claim, citation, anonymization, and cross-document consistency verified",
+        "explicit human approval for the named release target"
+      ],
+      "reopen_when_changed": [
+        "a released manuscript or response changes materially",
+        "a promised action is found incomplete",
+        "a citation, number, artifact, or anonymization check fails"
+      ]
+    }
+  },
+  "allowed_transitions": {
+    "idea": [
+      {"to": "literature", "required_gates": []},
+      {"to": "method", "required_gates": ["idea_freeze"]}
+    ],
+    "literature": [
+      {"to": "idea", "required_gates": []},
+      {"to": "method", "required_gates": ["idea_freeze"]}
+    ],
+    "method": [
+      {"to": "idea", "required_gates": []},
+      {"to": "literature", "required_gates": []},
+      {"to": "experiment_results", "required_gates": ["method_experiment_approval"]}
+    ],
+    "experiment_results": [
+      {"to": "idea", "required_gates": []},
+      {"to": "literature", "required_gates": []},
+      {"to": "method", "required_gates": []},
+      {"to": "paper", "required_gates": ["claim_freeze"]}
+    ],
+    "paper": [
+      {"to": "literature", "required_gates": []},
+      {"to": "method", "required_gates": []},
+      {"to": "experiment_results", "required_gates": []},
+      {"to": "revision", "required_gates": ["release"]}
+    ],
+    "revision": [
+      {"to": "idea", "required_gates": []},
+      {"to": "literature", "required_gates": []},
+      {"to": "method", "required_gates": []},
+      {"to": "experiment_results", "required_gates": []},
+      {"to": "paper", "required_gates": []}
+    ]
+  },
+  "stages": {
+    "idea": {
+      "label": "Idea generation and freeze",
+      "reference": "01-idea.md",
+      "required_inputs": ["research brief", "resource and domain constraints", "known prior work"],
+      "allowed_actions": ["generate candidates", "stress-test mechanisms", "request literature evidence", "compare feasibility", "define predictions and kill criteria"],
+      "required_evidence": ["candidate comparison", "closest-work evidence", "falsifying outcomes", "feasibility and risk record"],
+      "exit_criteria": ["one versioned candidate is approval-ready", "novelty language is confidence-bounded", "predictions and kill criteria are explicit", "human approves idea_freeze"],
+      "prohibited_actions": ["declare novelty from intuition, titles, abstracts, popularity, or scores alone", "silently freeze an idea", "hide rejected candidates or contradictory evidence"],
+      "gate_to_exit": "idea_freeze"
+    },
+    "literature": {
+      "label": "Literature evidence and idea refinement",
+      "reference": "02-literature.md",
+      "required_inputs": ["research questions or candidate idea", "search scope and constraints"],
+      "allowed_actions": ["register searches", "screen and read sources", "trace citations", "record supporting and conflicting evidence", "compare closest work", "revise idea boundaries"],
+      "required_evidence": ["search protocol", "paper registry", "passage-level evidence records", "closest-work comparison", "search limitations and stopping rule"],
+      "exit_criteria": ["material claims have evidence IDs or are marked as author hypotheses", "closest work is read at sufficient depth", "conflicts and unknowns are explicit", "idea implications are recorded"],
+      "prohibited_actions": ["fabricate bibliographic metadata", "treat abstract-only reading as detailed method evidence", "use citation counts or stars as contribution evidence", "discard conflicting sources"],
+      "gate_to_exit": null
+    },
+    "method": {
+      "label": "Method formalization",
+      "reference": "03-method.md",
+      "required_inputs": ["approved idea", "closest-work evidence", "project constraints and existing implementation"],
+      "allowed_actions": ["define problem and assumptions", "derive objectives", "specify atomic modules and interfaces", "write aligned pseudocode", "map equations to code", "map predictions to experiments"],
+      "required_evidence": ["versioned method contract", "notation and shape audit", "equation-to-code map", "prediction-to-experiment map", "unresolved-risk list"],
+      "exit_criteria": ["central mechanism is unambiguous and implementable", "assumptions, exclusions, shapes, units, and failure behavior are explicit", "tests and falsifying predictions are defined", "human approves method_experiment_approval"],
+      "prohibited_actions": ["change the frozen contribution silently", "present heuristics as guarantees", "use theorem, optimal, stable, or safe without definitions and support", "approve experiments without testable predictions"],
+      "gate_to_exit": "method_experiment_approval"
+    },
+    "experiment_results": {
+      "label": "Experiment and result lifecycle",
+      "reference": "04-experiment-results.md",
+      "required_inputs": ["approved method and experiment contract", "registered predictions", "data, environment, resource, and safety profile"],
+      "allowed_actions": ["run integrity checks and baselines", "execute registered experiments", "diagnose failures", "perform registered analyses", "generate traceable figures and tables", "promote or reject claims"],
+      "required_evidence": ["experiment matrix", "complete run registry", "decision log", "analysis registry", "artifact manifest", "claim ledger"],
+      "exit_criteria": ["run provenance and inclusion decisions are auditable", "analysis matches the statistical unit and data-generating process", "claim wording is bounded by evidence", "human approves claim_freeze"],
+      "prohibited_actions": ["tune on the final test set", "select favorable seeds or silently replace failed runs", "change metrics or exclusions after seeing results without labeling exploratory analysis", "promote a claim from memory or unregistered output", "infer causality from an uncontrolled comparison"],
+      "gate_to_exit": "claim_freeze"
+    },
+    "paper": {
+      "label": "Paper production and submission preparation",
+      "reference": "05-paper.md",
+      "required_inputs": ["frozen claim ledger", "method and experiment artifacts", "literature evidence", "venue and anonymization requirements"],
+      "allowed_actions": ["map claims to sections", "draft and revise", "integrate citations and artifacts", "compile and render", "audit consistency and submission constraints"],
+      "required_evidence": ["paper claim map", "paper change map", "bibliography provenance", "compilation and render checks", "submission checklist"],
+      "exit_criteria": ["every central claim and number traces backward", "wording stays within the claim ledger", "citations, cross-references, anonymity, and venue constraints pass", "human approves the named release target"],
+      "prohibited_actions": ["write around missing evidence", "invent citations or results", "strengthen a frozen claim for rhetoric", "claim compilation or visual inspection without performing it", "submit externally without release approval"],
+      "gate_to_exit": "release"
+    },
+    "revision": {
+      "label": "Review and revision",
+      "reference": "06-revision.md",
+      "required_inputs": ["verbatim editor and reviewer feedback", "released manuscript", "current claim and evidence artifacts"],
+      "allowed_actions": ["decompose concerns", "triage required evidence", "run the lightest defensible verification", "revise source artifacts", "write point-by-point responses", "audit promises and consistency"],
+      "required_evidence": ["review map", "revision change log", "verified manuscript diffs and locations", "response document", "release checklist"],
+      "exit_criteria": ["each atomic concern has a direct answer and verified action", "manuscript and response agree", "numbers, citations, locations, and promised work are checked", "human approves revision_rebuttal release"],
+      "prohibited_actions": ["answer before applying promised changes", "misrepresent old text as newly added", "overpromise experiments or future work", "weaken or omit reviewer wording", "send a response without release approval"],
+      "gate_to_exit": "release"
+    }
+  },
+  "global_prohibited_actions": [
+    "infer human approval from silence or prior chat",
+    "edit gate status, decision IDs, or gate history outside researchctl",
+    "treat .research/memory.md as scientific evidence or Gate authority",
+    "read or write Codex global memory as project research state",
+    "create or require .planning artifacts",
+    "fabricate citations, measurements, metadata, code behavior, checks, or completed actions",
+    "erase failed, excluded, null, negative, or contradictory evidence",
+    "perform destructive, expensive, safety-relevant, or external actions without sufficient authority"
+  ],
+  "semantic_audit": [
+    "Every material claim is linked to adequate evidence or clearly labeled as hypothesis, interpretation, or unknown.",
+    "Claim strength, scope, causal language, novelty language, and certainty do not exceed the evidence.",
+    "All reported numbers and artifacts resolve to registered analyses, runs, code/configuration, and data or environment provenance.",
+    "Negative, null, failed, excluded, and contradictory evidence is retained with reasons.",
+    "No promised search, experiment, analysis, compilation, render inspection, citation check, or edit is reported as complete without verification.",
+    "The active stage, requested transition, and Gate state comply with this policy.",
+    "Gate decisions are explicit, human-authorized, and recorded through researchctl rather than direct state edits.",
+    "Project memory is used only for bounded navigation and every verified memory item points to canonical evidence.",
+    "The handoff states unresolved risks and the next smallest executable action without open-ended tuning promises."
+  ]
+}

@@ -1,6 +1,6 @@
 # Third-party notices
 
-This repository contains selective, pinned upstream snapshots under `vendor/`. Local composition-layer files under `skills/`, `contracts/`, `profiles/`, `docs/`, and `scripts/` are maintained by this project.
+This repository contains selective, pinned upstream snapshots under `vendor/`. The local runtime composition under `skills/research/`, `hooks/`, and `scripts/` is maintained by this project. Vendored material is provenance reference only and is not registered as a runtime Skill.
 
 ## Galaxy-Dawn/claude-scholar
 

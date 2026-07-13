@@ -1,4 +1,0 @@
-interface:
-  display_name: "Review Revision"
-  short_description: "Map reviews to verified edits, evidence, and replies"
-  default_prompt: "Use $review-revision to create a point-by-point revision map and evidence-backed reviewer response."

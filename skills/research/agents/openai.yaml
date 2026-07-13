@@ -1,0 +1,7 @@
+interface:
+  display_name: "Research Workflow"
+  short_description: "用项目状态、证据链和人工 Gate 驱动六阶段科研流程"
+  default_prompt: "Use $research to inspect this project's research state and advance the smallest evidence-backed next step."
+
+policy:
+  allow_implicit_invocation: true

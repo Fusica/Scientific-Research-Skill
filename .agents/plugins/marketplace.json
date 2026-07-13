@@ -10,14 +10,14 @@
         "source": "local",
         "path": "."
       },
-      "description": "Auditable research workflow with default file-based planning and scientific gates.",
-      "version": "0.2.0",
+      "description": "Project-scoped six-stage research workflow with local memory and explicit scientific Gates.",
+      "version": "1.0.0",
       "author": {
         "name": "Fusica"
       },
       "repository": "https://github.com/Fusica/Scientific-Research-Skill",
       "license": "Apache-2.0",
-      "keywords": ["research", "planning", "machine-learning", "robotics"],
+      "keywords": ["research", "machine-learning", "robotics", "reproducibility"],
       "policy": {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"

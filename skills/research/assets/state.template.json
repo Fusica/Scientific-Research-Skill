@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "workflow_version": "1.0.0",
+  "enabled": true,
+  "project_id": "",
+  "project_name": "",
+  "current_stage": "idea",
+  "gates": {
+    "idea_freeze": {
+      "status": "pending",
+      "latest_decision_id": null,
+      "history": []
+    },
+    "method_experiment_approval": {
+      "status": "pending",
+      "latest_decision_id": null,
+      "history": []
+    },
+    "claim_freeze": {
+      "status": "pending",
+      "latest_decision_id": null,
+      "history": []
+    },
+    "release": {
+      "status": "pending",
+      "latest_decision_id": null,
+      "history": []
+    }
+  },
+  "artifacts": {},
+  "last_checkpoint": null,
+  "stage_history": [],
+  "created_at": null,
+  "updated_at": null
+}

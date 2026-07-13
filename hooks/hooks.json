@@ -6,10 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/research-workflow-hook.js\" SessionStart",
-            "commandWindows": "node \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" SessionStart",
+            "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" SessionStart",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" SessionStart",
             "timeout": 5,
-            "statusMessage": "Loading research project context..."
+            "statusMessage": "Loading bounded research project context..."
           }
         ]
       }
@@ -19,10 +19,51 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/research-workflow-hook.js\" UserPromptSubmit",
-            "commandWindows": "node \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" UserPromptSubmit",
+            "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" UserPromptSubmit",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" UserPromptSubmit",
             "timeout": 5,
-            "statusMessage": "Applying research workflow guard..."
+            "statusMessage": "Applying the active research-stage contract..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" PreToolUse",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" PreToolUse",
+            "timeout": 5,
+            "statusMessage": "Checking mechanical research boundaries..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" PostToolUse",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" PostToolUse",
+            "timeout": 5,
+            "statusMessage": "Validating touched research state..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" Stop",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" Stop",
+            "timeout": 5,
+            "statusMessage": "Running the one-pass research semantic audit..."
           }
         ]
       }

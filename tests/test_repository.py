@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,174 +13,110 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryTest(unittest.TestCase):
-    def run_script(
-        self, *args: str, cwd: Path = ROOT
-    ) -> subprocess.CompletedProcess[str]:
+    def run_python(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, *args],
-            cwd=cwd,
+            cwd=ROOT,
             check=False,
             capture_output=True,
             text=True,
         )
 
-    def clone_for_mutation(self, destination: Path) -> Path:
-        clone = destination / "repo"
-        shutil.copytree(
-            ROOT,
-            clone,
-            ignore=shutil.ignore_patterns(
-                ".git", ".venv", "__pycache__", "*.pyc", ".DS_Store"
-            ),
-        )
-        return clone
-
     def test_repository_validator(self) -> None:
-        result = self.run_script("scripts/validate_repo.py")
+        result = self.run_python("scripts/validate_repo.py")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("one Skill, six stages, four Gates", result.stdout)
 
-    def test_installer_dry_run_does_not_write(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "skills"
-            result = self.run_script(
-                "scripts/install_codex.py",
-                "--destination",
-                str(destination),
-                "--dry-run",
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(destination.exists())
-
-    def test_installer_copy_single_skill(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "skills"
-            result = self.run_script(
-                "scripts/install_codex.py",
-                "--mode",
-                "copy",
-                "--destination",
-                str(destination),
-                "--skill",
-                "idea-evolution",
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((destination / "idea-evolution" / "SKILL.md").is_file())
-            self.assertFalse((destination / "research-orchestrator").exists())
-
-    def test_full_install_never_copies_vendor(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "skills"
-            result = self.run_script(
-                "scripts/install_codex.py",
-                "--mode",
-                "copy",
-                "--destination",
-                str(destination),
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            installed = {path.name for path in destination.iterdir()}
-            self.assertEqual(len(installed), 8)
-            self.assertNotIn("vendor", installed)
-
-    def test_json_contracts_parse(self) -> None:
-        for path in (ROOT / "contracts").glob("*.json"):
-            with self.subTest(path=path.name):
-                json.loads(path.read_text(encoding="utf-8"))
-
-    def test_artifact_catalog_has_unique_roles_and_paths(self) -> None:
-        catalog = yaml.safe_load(
-            (ROOT / "contracts/artifact-catalog.yaml").read_text(encoding="utf-8")
+    def test_exactly_one_public_skill(self) -> None:
+        skills = {
+            path.name
+            for path in (ROOT / "skills").iterdir()
+            if path.is_dir() and (path / "SKILL.md").is_file()
+        }
+        self.assertEqual(skills, {"research"})
+        metadata = yaml.safe_load(
+            (ROOT / "skills/research/agents/openai.yaml").read_text(encoding="utf-8")
         )
-        records = catalog["artifacts"]
-        roles = [record["role"] for record in records]
-        paths = [record["canonical_path"] for record in records]
-        self.assertEqual(len(roles), len(set(roles)))
-        self.assertEqual(len(paths), len(set(paths)))
-        self.assertEqual(catalog["gate_authority"], ".research/project-state.yaml")
-        overview = next(
-            record for record in records if record["role"] == "project_overview"
-        )
-        self.assertEqual(overview["authority"], "derived_navigation")
-        self.assertFalse(overview["allowed_as_gate_basis"])
+        self.assertIn("$research", metadata["interface"]["default_prompt"])
 
-    def test_plugin_manifest_and_marketplace_versions_match(self) -> None:
+    def test_policy_is_json_compatible_and_canonical(self) -> None:
+        policy = json.loads(
+            (ROOT / "skills/research/references/policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            policy["stage_order"],
+            [
+                "idea",
+                "literature",
+                "method",
+                "experiment_results",
+                "paper",
+                "revision",
+            ],
+        )
+        self.assertEqual(
+            policy["gate_order"],
+            [
+                "idea_freeze",
+                "method_experiment_approval",
+                "claim_freeze",
+                "release",
+            ],
+        )
+        self.assertEqual(policy["gates"]["idea_freeze"]["advance_to"], "method")
+        self.assertEqual(
+            policy["gates"]["method_experiment_approval"]["advance_to"],
+            "experiment_results",
+        )
+
+    def test_state_and_memory_templates_are_project_local_contract(self) -> None:
+        state = json.loads(
+            (ROOT / "skills/research/assets/state.template.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["current_stage"], "idea")
+        self.assertTrue(all(gate["status"] == "pending" for gate in state["gates"].values()))
+        memory = (ROOT / "skills/research/assets/memory.template.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Verified Facts", memory)
+        self.assertIn("Failed Attempts and Lessons", memory)
+
+    def test_manifest_and_marketplace_match(self) -> None:
         manifest = json.loads(
             (ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         marketplace = json.loads(
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["name"], "scientific-research-skill")
-        self.assertEqual(marketplace["plugins"][0]["name"], manifest["name"])
-        self.assertEqual(marketplace["plugins"][0]["version"], manifest["version"])
-        self.assertEqual(
-            marketplace["plugins"][0]["source"],
-            {"source": "local", "path": "."},
-        )
+        entry = marketplace["plugins"][0]
+        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(entry["name"], manifest["name"])
+        self.assertEqual(entry["version"], manifest["version"])
+        self.assertEqual(entry["source"], {"source": "local", "path": "."})
         self.assertNotIn("hooks", manifest)
 
-    def test_planning_is_default_but_not_gate_authority(self) -> None:
-        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        orchestrator = (
-            ROOT / "skills/research-orchestrator/SKILL.md"
-        ).read_text(encoding="utf-8")
-        planning = (
-            ROOT / "skills/research-orchestrator/references/planning-with-files.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("default execution layer", agents)
-        self.assertIn("default coordination layer", orchestrator)
-        self.assertIn("no scientific Gate authority", planning)
-        self.assertIn("sole gate authority", agents)
+    def test_legacy_runtime_layers_are_removed(self) -> None:
+        for relative in ("contracts", "profiles", "docs"):
+            root = ROOT / relative
+            self.assertFalse(root.exists() and any(root.rglob("*")), relative)
+        self.assertFalse((ROOT / "scripts/install_codex.py").exists())
+        self.assertFalse((ROOT / "skills/research-orchestrator").exists())
 
-    def test_new_claim_is_unassessed(self) -> None:
-        ledger = yaml.safe_load(
-            (ROOT / "contracts/claim-ledger.template.yaml").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(ledger["claims"][0]["status"], "unassessed")
+    def test_researchctl_has_all_public_commands(self) -> None:
+        result = self.run_python("scripts/researchctl.py", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for command in ("init", "status", "enable", "disable", "gate", "checkpoint", "doctor"):
+            self.assertIn(command, result.stdout)
 
-    def test_root_license_has_local_owner(self) -> None:
-        root_license = (ROOT / "LICENSE").read_text(encoding="utf-8")
-        vendor_license = (ROOT / "vendor/evoskills/LICENSE").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("Copyright 2026 Fusica", root_license)
-        self.assertNotEqual(root_license, vendor_license)
-
-    def test_validator_rejects_broken_prediction_lineage(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            clone = self.clone_for_mutation(Path(temporary))
-            matrix_path = clone / "contracts/experiment-matrix.template.yaml"
-            matrix = yaml.safe_load(matrix_path.read_text(encoding="utf-8"))
-            matrix["experiments"][0]["prediction_ids"] = ["PRED-999"]
-            matrix_path.write_text(
-                yaml.safe_dump(matrix, sort_keys=False), encoding="utf-8"
-            )
-            result = self.run_script(
-                "scripts/validate_repo.py",
-                cwd=clone,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("prediction_ids must resolve", result.stderr)
-
-    def test_validator_rejects_manifest_without_checksum(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            clone = self.clone_for_mutation(Path(temporary))
-            manifest_path = (
-                clone / "contracts/artifact-manifest-record.template.yaml"
-            )
-            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-            del manifest["sha256"]
-            manifest_path.write_text(
-                yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
-            )
-            result = self.run_script(
-                "scripts/validate_repo.py",
-                cwd=clone,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("missing keys sha256", result.stderr)
+    def test_root_license_and_provenance_remain(self) -> None:
+        self.assertIn("Copyright 2026 Fusica", (ROOT / "LICENSE").read_text())
+        self.assertTrue((ROOT / "THIRD_PARTY_NOTICES.md").is_file())
+        self.assertTrue((ROOT / "upstreams.lock.yaml").is_file())
 
 
 if __name__ == "__main__":

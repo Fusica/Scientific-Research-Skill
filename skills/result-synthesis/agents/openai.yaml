@@ -1,4 +1,0 @@
-interface:
-  display_name: "Result Synthesis"
-  short_description: "Turn registered runs into defensible research claims"
-  default_prompt: "Use $result-synthesis to turn registered runs into statistical results, figures, and an auditable claim ledger."

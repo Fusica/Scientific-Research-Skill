@@ -1,7 +1,7 @@
 {
   "name": "scientific-research-skill",
-  "version": "0.2.0",
-  "description": "Auditable end-to-end research workflows with default file-based planning, scientific gates, and traceable artifacts.",
+  "version": "1.0.0",
+  "description": "Project-scoped research workflow with six stages, explicit human Gates, local memory, and enforceable Codex Hook boundaries.",
   "author": {
     "name": "Fusica",
     "url": "https://github.com/Fusica"
@@ -9,20 +9,20 @@
   "homepage": "https://github.com/Fusica/Scientific-Research-Skill",
   "repository": "https://github.com/Fusica/Scientific-Research-Skill",
   "license": "Apache-2.0",
-  "keywords": ["research", "planning", "machine-learning", "robotics", "reproducibility"],
+  "keywords": ["research", "machine-learning", "robotics", "reproducibility"],
   "skills": "./skills/",
   "interface": {
     "displayName": "Scientific Research Skill",
-    "shortDescription": "Auditable research workflow with default planning",
-    "longDescription": "Coordinate research from idea formation through experiments, paper production, and reviewer revision with project-local planning, explicit evidence boundaries, and human-approved scientific gates.",
+    "shortDescription": "Project-scoped, evidence-backed research workflow",
+    "longDescription": "Guide research from idea refinement through literature, method design, experiments, paper production, and reviewer revision with project-local state, explicit human Gates, and layered Hook checks.",
     "developerName": "Fusica",
     "category": "Education & Research",
-    "capabilities": ["Research planning", "Evidence traceability", "Reviewer revision"],
+    "capabilities": ["Research workflow", "Evidence discipline", "Reviewer revision"],
     "websiteURL": "https://github.com/Fusica/Scientific-Research-Skill",
     "defaultPrompt": [
-      "Inspect this research project and resume the next evidence-backed task.",
-      "Challenge this idea, search the background, and design decisive experiments.",
-      "Map these reviewer comments to evidence, edits, and point-by-point replies."
+      "Use $research to inspect this project and identify the next evidence-backed action.",
+      "Use $research to challenge this idea and build a decisive research plan.",
+      "Use $research to map these reviewer comments to evidence, edits, and replies."
     ]
   }
 }

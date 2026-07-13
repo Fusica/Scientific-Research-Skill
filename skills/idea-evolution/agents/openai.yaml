@@ -1,4 +1,0 @@
-interface:
-  display_name: "Idea Evolution"
-  short_description: "Refine research ideas with evidence and critical review"
-  default_prompt: "Use $idea-evolution to turn a research direction into evidence-grounded candidate ideas and an approval-ready idea card."
