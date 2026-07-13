@@ -1,0 +1,51 @@
+schema_version: 1
+artifact_id: EXP-MATRIX-001
+artifact_version: 1
+content_hash: null
+idea_ref:
+  idea_id: IDEA-001
+  idea_version: 1
+method_contract_ref:
+  artifact_id: METHOD-001
+  artifact_version: 1
+  content_hash: null
+gate_ref: method_experiment
+experiments:
+  - experiment_id: EXP-001
+    spec_version: 1
+    spec_hash: null
+    stage: integrity_check
+    question: ""
+    origin_claim_candidate_ids:
+      - CLAIM-CAND-001
+    prediction_ids:
+      - PRED-001
+    hypothesis: ""
+    independent_variables: []
+    controls: []
+    baselines: []
+    data_or_environment: ""
+    statistical_unit: ""
+    metrics:
+      primary: []
+      secondary: []
+    repetitions:
+      design: ""
+      rationale: ""
+    analysis_plan:
+      plan_id: ANALYSIS-PLAN-001
+      version: 1
+      content_hash: null
+      primary_estimand: ""
+      inclusion_criteria: []
+      exclusion_criteria: []
+      method: ""
+      uncertainty: ""
+      multiplicity_family: null
+      sequential_stopping: null
+    expected_artifacts: []
+    resources: {compute: "", time: "", hardware: ""}
+    safety_constraints: []
+    stop_criteria: []
+    kill_criteria: []
+    dependencies: []

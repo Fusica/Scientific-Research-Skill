@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "run_id": "RUN-001",
+  "experiment_id": "EXP-001",
+  "experiment_spec_version": 1,
+  "experiment_spec_hash": null,
+  "method_contract_ref": {
+    "artifact_id": "METHOD-001",
+    "artifact_version": 1,
+    "content_hash": null
+  },
+  "parent_run_id": null,
+  "supersedes_run_id": null,
+  "started_at": "",
+  "ended_at": "",
+  "execution_status": "planned",
+  "scientific_outcome": "pending",
+  "code": {
+    "repository": "",
+    "commit": "",
+    "dirty": false,
+    "dirty_patch_artifact_id": null,
+    "dirty_patch_hash": null,
+    "command": "",
+    "arguments": [],
+    "cwd": ""
+  },
+  "config": {
+    "source_path": "",
+    "resolved_artifact_id": "",
+    "resolved_hash": "",
+    "seed": null
+  },
+  "profile": {
+    "id": null,
+    "version": null,
+    "content_hash": null
+  },
+  "randomization_record": {},
+  "data_or_environment": {
+    "id": "",
+    "version": "",
+    "split_or_scenario": "",
+    "content_hash": null
+  },
+  "runtime": {
+    "hardware": "",
+    "operating_system": "",
+    "software_environment_artifact_id": "",
+    "software_environment_hash": "",
+    "container_digest": null
+  },
+  "outputs": [
+    {
+      "artifact_id": "",
+      "path": "",
+      "sha256": "",
+      "media_type": ""
+    }
+  ],
+  "metrics_artifact_id": null,
+  "failure": {
+    "category": null,
+    "symptoms": null,
+    "minimal_reproduction_artifact_id": null,
+    "root_cause": null,
+    "changed_factor": null,
+    "resolution": null
+  },
+  "analysis_eligibility": {
+    "included": null,
+    "reason": null
+  },
+  "notes": ""
+}

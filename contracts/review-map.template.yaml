@@ -1,0 +1,39 @@
+schema_version: 1
+artifact_id: REVIEW-MAP-001
+artifact_version: 1
+content_hash: null
+comments:
+  - comment_id: R1-C01
+    reviewer: Reviewer 1
+    verbatim_comment: ""
+    atomic_concern: ""
+    category: clarification
+    scientific_question: ""
+    current_state:
+      evidence_ids: []
+      claim_ids: []
+      experiment_ids: []
+      run_ids: []
+      analysis_ids: []
+      manuscript_locations: []
+    action:
+      necessity: required
+      type: manuscript_edit
+      description: ""
+      missing_author_input: []
+      target_files: []
+      planned_change_ids: []
+      verification: ""
+    status: in_progress
+    response:
+      direct_answer: ""
+      evidence_summary: ""
+      change_summary: ""
+      exact_locations: []
+      limitation: ""
+    release_checks:
+      action_completed: false
+      manuscript_matches_reply: false
+      numbers_verified: false
+      citations_verified: false
+      claim_strength_verified: false

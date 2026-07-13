@@ -1,0 +1,4 @@
+interface:
+  display_name: "Method Formalization"
+  short_description: "Formalize methods from math to executable interfaces"
+  default_prompt: "Use $method-formalization to create a method contract with equations, pseudocode, assumptions, and math-to-code mappings."

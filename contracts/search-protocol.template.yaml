@@ -1,0 +1,19 @@
+schema_version: 1
+artifact_id: SEARCH-001
+artifact_version: 1
+content_hash: null
+research_questions: []
+concepts_and_synonyms: []
+date_boundary: null
+venue_boundary: null
+sources: []
+queries:
+  - query_id: QUERY-001
+    source: ""
+    query: ""
+    executed_at: ""
+    result_count: null
+inclusion_criteria: []
+exclusion_criteria: []
+stopping_rule: ""
+status: draft

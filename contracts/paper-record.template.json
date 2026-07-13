@@ -1,0 +1,19 @@
+{
+  "source_id": "SRC-001",
+  "title": "",
+  "authors": [],
+  "year": null,
+  "venue": "",
+  "publication_status": "unknown",
+  "identifiers": {
+    "doi": null,
+    "arxiv": null,
+    "openreview": null
+  },
+  "canonical_url": "",
+  "accessed_at": "",
+  "query_ids": [],
+  "screening_state": "discovered",
+  "reading_depth": "metadata",
+  "bibtex_provenance": null
+}

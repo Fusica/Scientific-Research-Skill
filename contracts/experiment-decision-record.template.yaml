@@ -1,0 +1,23 @@
+schema_version: 1
+decision_id: EXP-DEC-001
+decided_at: ""
+trigger:
+  run_ids: []
+  evidence_artifact_ids: []
+diagnosis:
+  category: ""
+  symptoms: ""
+  minimal_reproduction_artifact_id: null
+  root_cause: null
+controlled_change:
+  factor: ""
+  from: null
+  to: null
+outcome: ""
+next_action:
+  type: rerun
+  target_ids: []
+reopens:
+  stages: []
+  reason: null
+impacted_artifact_ids: []

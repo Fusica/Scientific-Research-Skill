@@ -1,0 +1,36 @@
+schema_version: 1
+artifact_id: CLAIM-LEDGER-001
+artifact_version: 1
+content_hash: null
+gate_ref: claim_freeze
+claims:
+  - claim_id: CLAIM-001
+    claim_version: 1
+    supersedes_claim_id: null
+    origin_claim_candidate_ids:
+      - CLAIM-CAND-001
+    prediction_ids:
+      - PRED-001
+    experiment_ids: []
+    text: ""
+    status: unassessed
+    scope:
+      settings: []
+      populations_or_environments: []
+      assumptions: []
+    evidence:
+      literature_evidence_ids: []
+      run_ids: []
+      analysis_ids: []
+      artifact_ids: []
+    statistics:
+      estimand: ""
+      estimate: null
+      effect_size: null
+      uncertainty: ""
+      test: null
+      multiplicity_handling: null
+    limitations: []
+    allowed_wording: ""
+    forbidden_stronger_wording: ""
+    manuscript_locations: []

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Experiment Lifecycle"
+  short_description: "Plan and govern experiments through evidence gates"
+  default_prompt: "Use $experiment-lifecycle to build an experiment matrix, run registry, and evidence-based next-step plan."

@@ -1,0 +1,20 @@
+schema_version: 1
+artifact_id: FIG-001
+artifact_type: figure
+path: ""
+sha256: ""
+media_type: ""
+created_by_analysis_id: ANALYSIS-001
+source_run_ids: []
+source_artifact_ids: []
+generation:
+  code_commit: ""
+  entrypoint: ""
+  config_hash: ""
+publication_metadata:
+  title_or_caption: ""
+  statistical_unit: ""
+  aggregation: ""
+  uncertainty: ""
+  independent_repetitions: null
+status: draft

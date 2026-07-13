@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Orchestrator"
+  short_description: "Route projects through research stages and evidence gates"
+  default_prompt: "Use $research-orchestrator to inspect the current project state, choose the next research stage, and produce a concrete handoff."

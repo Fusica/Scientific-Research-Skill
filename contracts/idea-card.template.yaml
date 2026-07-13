@@ -1,0 +1,48 @@
+schema_version: 1
+artifact_id: IDEA-CARD-001
+artifact_version: 1
+content_hash: null
+idea_id: IDEA-001
+idea_version: 1
+status: candidate
+gate_ref: idea_freeze
+title: ""
+research_question: ""
+problem:
+  setting: ""
+  importance: ""
+  current_limit: ""
+proposed_insight:
+  mechanism: ""
+  contribution_type: method
+  expected_delta: ""
+closest_work: []
+claim_candidates:
+  - claim_candidate_id: CLAIM-CAND-001
+    text: ""
+    required_evidence: []
+predictions:
+  - prediction_id: PRED-001
+    claim_candidate_ids:
+      - CLAIM-CAND-001
+    observable: ""
+    falsifying_outcome: ""
+    baseline_or_intervention: ""
+    boundary_conditions: []
+feasibility:
+  data: ""
+  code: ""
+  compute: ""
+  hardware: ""
+  time: ""
+risks: []
+kill_criteria: []
+scores:
+  interestingness: {band: unknown, confidence: low, evidence_ids: []}
+  novelty: {band: unknown, confidence: low, evidence_ids: []}
+  feasibility: {band: unknown, confidence: low, evidence_ids: []}
+  testability: {band: unknown, confidence: low, evidence_ids: []}
+open_questions: []
+decision:
+  recommendation: revise
+  rationale: ""

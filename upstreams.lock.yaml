@@ -1,0 +1,59 @@
+schema_version: 1
+generated_at: 2026-07-13
+upstreams:
+  - id: claude-scholar
+    repository: https://github.com/Galaxy-Dawn/claude-scholar
+    ref: codex
+    commit: 6fa4540f2ceafeaa5c610532906fec5810ee4e19
+    license: MIT
+    integration: vendored_verbatim
+    selection_sha256: a360eea729534895a2c506435f4f8ed1939142526c0bf705e89781281f4e841b
+    selected:
+      - skills/research-ideation
+      - skills/results-analysis
+      - skills/results-report
+      - skills/ml-paper-writing/SKILL.md
+      - skills/ml-paper-writing/references
+      - skills/publication-chart-skill
+  - id: evoskills
+    repository: https://github.com/EvoScientist/EvoSkills
+    ref: main
+    commit: 29e2c67f12858829ad0900645432b340c3f77522
+    license: Apache-2.0
+    integration: vendored_verbatim
+    selection_sha256: 27a08462e4ba07ca56428925f3c8963f5ac6cd376e89b5f4405b483aab6d11c8
+    selected:
+      - skills/research-ideation
+      - skills/paper-navigator
+      - skills/paper-planning
+      - skills/experiment-pipeline
+      - skills/experiment-craft
+      - skills/experiment-iterative-coder
+      - skills/evo-memory
+  - id: evoscientist
+    repository: https://github.com/EvoScientist/EvoScientist
+    ref: main
+    commit: 49770949daa7ca4ef4744a2f089100f8b872b869
+    license: Apache-2.0
+    integration: runtime_audited_not_vendored
+    official_skill_companion: https://github.com/EvoScientist/EvoSkills
+    selected: []
+  - id: nature-skills
+    repository: https://github.com/Yuan1z0825/nature-skills
+    ref: main
+    commit: 4170a8a6262642841699c55d468e21ff70a2fe34
+    license: Apache-2.0
+    integration: vendored_verbatim
+    selection_sha256: a556ffcdf782f962ee6c0cd996698ddd12fc79f00b10b652ff2a39cb6f301a3a
+    selected:
+      - skills/_shared
+      - skills/nature-writing
+      - skills/nature-response
+      - skills/nature-statistics
+  - id: agent-research-skills
+    repository: https://github.com/lingzhi227/agent-research-skills
+    ref: main
+    commit: 9e6c085d65e313e475e921fdfe795ac11eb7589e
+    license: not_found_in_audited_snapshot
+    integration: conceptual_clean_room_only
+    selected: []

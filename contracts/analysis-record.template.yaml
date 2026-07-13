@@ -1,0 +1,44 @@
+schema_version: 1
+analysis_id: ANALYSIS-001
+analysis_version: 1
+status: draft
+analysis_plan_ref:
+  plan_id: ANALYSIS-PLAN-001
+  version: 1
+  content_hash: null
+experiment_ids: []
+origin_claim_candidate_ids: []
+prediction_ids: []
+run_population:
+  included_run_ids: []
+  excluded:
+    - run_id: null
+      reason: null
+code:
+  repository: ""
+  commit: ""
+  dirty: false
+  dirty_patch_hash: null
+  entrypoint: ""
+config:
+  artifact_id: ""
+  content_hash: ""
+statistical_unit: ""
+independent_repetitions: null
+estimand: ""
+estimate: null
+effect_size: null
+uncertainty:
+  method: ""
+  level: null
+  interval: null
+test: null
+multiplicity:
+  family: null
+  method: null
+outputs:
+  artifact_ids: []
+validation:
+  checked_by: null
+  checked_at: null
+  status: pending

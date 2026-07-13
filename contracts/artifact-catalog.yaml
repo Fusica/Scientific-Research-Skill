@@ -1,0 +1,72 @@
+schema_version: 1
+state_root: .research
+gate_authority: .research/project-state.yaml
+artifacts:
+  - role: project_state
+    canonical_path: .research/project-state.yaml
+    template: contracts/project-state.template.yaml
+    producer: research-orchestrator
+  - role: idea_card
+    canonical_path: .research/idea/idea_card.yaml
+    template: contracts/idea-card.template.yaml
+    producer: idea-evolution
+  - role: search_protocol
+    canonical_path: .research/literature/search_protocol.yaml
+    template: contracts/search-protocol.template.yaml
+    producer: literature-evidence
+  - role: paper_registry
+    canonical_path: .research/literature/paper_registry.jsonl
+    record_template: contracts/paper-record.template.json
+    producer: literature-evidence
+  - role: evidence_matrix
+    canonical_path: .research/literature/evidence_matrix.jsonl
+    record_template: contracts/evidence-record.template.json
+    producer: literature-evidence
+  - role: closest_work
+    canonical_path: .research/literature/closest_work.md
+    template: null
+    producer: literature-evidence
+  - role: method_contract
+    canonical_path: .research/method/method_contract.md
+    template: contracts/method-contract.template.md
+    producer: method-formalization
+  - role: experiment_matrix
+    canonical_path: .research/experiments/experiment_matrix.yaml
+    template: contracts/experiment-matrix.template.yaml
+    producer: experiment-lifecycle
+  - role: run_registry
+    canonical_path: .research/experiments/run_registry.jsonl
+    record_template: contracts/run-record.template.json
+    producer: experiment-lifecycle
+  - role: experiment_decision_log
+    canonical_path: .research/experiments/decision_log.yaml
+    record_template: contracts/experiment-decision-record.template.yaml
+    producer: experiment-lifecycle
+  - role: analysis_registry
+    canonical_path: .research/results/analysis_registry.yaml
+    record_template: contracts/analysis-record.template.yaml
+    producer: result-synthesis
+  - role: publication_artifact_manifest
+    canonical_path: .research/results/artifact_manifest.yaml
+    record_template: contracts/artifact-manifest-record.template.yaml
+    producer: result-synthesis
+  - role: claim_ledger
+    canonical_path: .research/results/claim_ledger.yaml
+    template: contracts/claim-ledger.template.yaml
+    producer: result-synthesis
+  - role: paper_claim_map
+    canonical_path: .research/paper/paper_claim_map.yaml
+    template: contracts/paper-claim-map.template.yaml
+    producer: paper-production
+  - role: paper_change_map
+    canonical_path: .research/paper/paper_change_map.yaml
+    template: contracts/paper-change-map.template.yaml
+    producer: paper-production
+  - role: review_map
+    canonical_path: .research/revision/review_map.yaml
+    template: contracts/review-map.template.yaml
+    producer: review-revision
+  - role: revision_change_log
+    canonical_path: .research/revision/revision_change_log.yaml
+    record_template: contracts/revision-change-record.template.yaml
+    producer: review-revision

@@ -1,0 +1,50 @@
+schema_version: 1
+project_id: PROJECT-001
+title: ""
+current_stage: intake
+active_stages:
+  - intake
+domain_profile:
+  id: null
+  version: null
+  content_hash: null
+venue_profile:
+  id: null
+  version: null
+  verified_at: null
+  content_hash: null
+stages:
+  intake: in_progress
+  idea: pending
+  literature: pending
+  method: pending
+  experiment: pending
+  result: pending
+  paper: pending
+  revision: pending
+gates:
+  idea_freeze:
+    status: pending
+    latest_decision_id: null
+  method_experiment:
+    status: pending
+    latest_decision_id: null
+  claim_freeze:
+    status: pending
+    latest_decision_id: null
+  external_release:
+    status: pending
+    latest_decision_id: null
+    release_target: null
+gate_decisions: []
+artifact_registry:
+  - artifact_id: STATE-001
+    role: project_state
+    path: .research/project-state.yaml
+    schema_version: 1
+    artifact_version: 1
+    content_hash: null
+    status: draft
+stage_transition_history: []
+open_decisions: []
+last_updated: ""
