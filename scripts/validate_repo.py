@@ -33,6 +33,7 @@ EXPECTED_SKILLS = {
 
 EXPECTED_ARTIFACT_ROLES = {
     "project_state",
+    "project_overview",
     "idea_card",
     "search_protocol",
     "paper_registry",
@@ -50,6 +51,9 @@ EXPECTED_ARTIFACT_ROLES = {
     "review_map",
     "revision_change_log",
 }
+
+PLUGIN_NAME = "scientific-research-skill"
+PLUGIN_VERSION = "0.2.0"
 
 EXPECTED_UPSTREAM_COMMITS = {
     "claude-scholar": "6fa4540f2ceafeaa5c610532906fec5810ee4e19",
@@ -209,6 +213,160 @@ def validate_skill(path: Path) -> list[str]:
     return errors
 
 
+def validate_plugin_bundle() -> list[str]:
+    errors: list[str] = []
+    manifest_path = ROOT / ".codex-plugin/plugin.json"
+    manifest = load_json(manifest_path, errors)
+    require_keys(
+        manifest,
+        {
+            "name",
+            "version",
+            "description",
+            "author",
+            "skills",
+            "interface",
+        },
+        str(manifest_path),
+        errors,
+    )
+    if isinstance(manifest, dict):
+        if manifest.get("name") != PLUGIN_NAME:
+            errors.append(f"{manifest_path}: unexpected plugin name")
+        if manifest.get("version") != PLUGIN_VERSION:
+            errors.append(f"{manifest_path}: version must match {PLUGIN_VERSION}")
+        if manifest.get("skills") != "./skills/":
+            errors.append(f"{manifest_path}: skills must point to ./skills/")
+        if "hooks" in manifest:
+            errors.append(
+                f"{manifest_path}: omit hooks field; Codex discovers hooks/hooks.json"
+            )
+        interface = manifest.get("interface")
+        require_keys(
+            interface,
+            {
+                "displayName",
+                "shortDescription",
+                "longDescription",
+                "developerName",
+                "category",
+                "capabilities",
+                "defaultPrompt",
+            },
+            f"{manifest_path} interface",
+            errors,
+        )
+        if isinstance(interface, dict):
+            prompts = interface.get("defaultPrompt")
+            if not isinstance(prompts, list) or not 1 <= len(prompts) <= 3:
+                errors.append(
+                    f"{manifest_path}: interface.defaultPrompt must contain 1-3 prompts"
+                )
+
+    marketplace_path = ROOT / ".agents/plugins/marketplace.json"
+    marketplace = load_json(marketplace_path, errors)
+    require_keys(
+        marketplace,
+        {"name", "plugins"},
+        str(marketplace_path),
+        errors,
+    )
+    if isinstance(marketplace, dict):
+        if marketplace.get("name") != PLUGIN_NAME:
+            errors.append(f"{marketplace_path}: marketplace name mismatch")
+        plugins = marketplace.get("plugins")
+        entry = plugins[0] if isinstance(plugins, list) and len(plugins) == 1 else None
+        if entry is None:
+            errors.append(f"{marketplace_path}: expected exactly one plugin entry")
+        else:
+            require_keys(
+                entry,
+                {"name", "source", "version", "policy", "category"},
+                f"{marketplace_path} plugin entry",
+                errors,
+            )
+            if entry.get("name") != PLUGIN_NAME:
+                errors.append(f"{marketplace_path}: plugin entry name mismatch")
+            if entry.get("version") != PLUGIN_VERSION:
+                errors.append(f"{marketplace_path}: plugin version mismatch")
+            if entry.get("source") != {"source": "local", "path": "."}:
+                errors.append(f"{marketplace_path}: unexpected plugin source")
+
+    hooks_path = ROOT / "hooks/hooks.json"
+    hooks_document = load_json(hooks_path, errors)
+    hooks = hooks_document.get("hooks") if isinstance(hooks_document, dict) else None
+    if not isinstance(hooks, dict):
+        errors.append(f"{hooks_path}: hooks must be an object")
+    else:
+        expected_events = {"SessionStart", "UserPromptSubmit"}
+        if set(hooks) != expected_events:
+            errors.append(f"{hooks_path}: expected SessionStart and UserPromptSubmit")
+        for event in sorted(expected_events):
+            groups = hooks.get(event)
+            group = groups[0] if isinstance(groups, list) and len(groups) == 1 else None
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            handler = (
+                handlers[0]
+                if isinstance(handlers, list) and len(handlers) == 1
+                else None
+            )
+            require_keys(
+                handler,
+                {"type", "command", "commandWindows", "timeout", "statusMessage"},
+                f"{hooks_path} {event} handler",
+                errors,
+            )
+            if not isinstance(handler, dict):
+                continue
+            command = handler.get("command", "")
+            windows = handler.get("commandWindows", "")
+            if handler.get("type") != "command":
+                errors.append(f"{hooks_path}: {event} must use a command handler")
+            if "hooks/research-workflow-hook.js" not in command:
+                errors.append(f"{hooks_path}: {event} command misses shared hook")
+            if "research-workflow-hook.js" not in windows:
+                errors.append(f"{hooks_path}: {event} Windows command misses shared hook")
+            if handler.get("timeout") != 5:
+                errors.append(f"{hooks_path}: {event} timeout must be 5 seconds")
+
+    hook_script = ROOT / "hooks/research-workflow-hook.js"
+    if not hook_script.is_file():
+        errors.append(f"missing hook script: {hook_script}")
+    else:
+        hook_text = hook_script.read_text(encoding="utf-8")
+        for forbidden in ("fs.writeFile", "fs.mkdir", "fs.unlink", "fs.rm"):
+            if forbidden in hook_text:
+                errors.append(f"{hook_script}: hook must remain read-only ({forbidden})")
+        for invariant in (
+            ".research/project-state.yaml is the sole scientific Gate authority",
+            ".planning/<task-id>/",
+            "not scientific evidence",
+            ".research/project-overview.md is derived navigation",
+            "active_planning_tasks",
+            'process.stdout.write("{}")',
+        ):
+            if invariant not in hook_text:
+                errors.append(f"{hook_script}: missing workflow invariant {invariant!r}")
+        for forbidden_selector in ("mtimeMs", "BEGIN PROJECT OVERVIEW DATA"):
+            if forbidden_selector in hook_text:
+                errors.append(
+                    f"{hook_script}: hook must not infer or inject project prose "
+                    f"({forbidden_selector})"
+                )
+
+    for relative in (
+        "contracts/project-overview.template.md",
+        "contracts/planning/task-plan.template.md",
+        "contracts/planning/findings.template.md",
+        "contracts/planning/progress.template.md",
+        "skills/research-orchestrator/references/planning-with-files.md",
+    ):
+        if not (ROOT / relative).is_file():
+            errors.append(f"missing default planning contract: {relative}")
+
+    return errors
+
+
 def selection_digest(root: Path) -> str:
     digest = hashlib.sha256()
     files = [
@@ -364,6 +522,22 @@ def validate_contracts() -> list[str]:
                 template = record.get("template") or record.get("record_template")
                 if template is not None and not (ROOT / template).is_file():
                     errors.append(f"{catalog_path}: missing template {template}")
+            overview_records = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and record.get("role") == "project_overview"
+            ]
+            if len(overview_records) == 1:
+                overview_record = overview_records[0]
+                if overview_record.get("authority") != "derived_navigation":
+                    errors.append(
+                        f"{catalog_path}: project overview must be derived navigation"
+                    )
+                if overview_record.get("allowed_as_gate_basis") is not False:
+                    errors.append(
+                        f"{catalog_path}: project overview cannot be a Gate basis"
+                    )
 
     project_state = load_yaml(ROOT / "contracts/project-state.template.yaml", errors)
     if isinstance(project_state, dict):
@@ -423,6 +597,29 @@ def validate_contracts() -> list[str]:
             "project-state artifact registry",
             errors,
         )
+        if isinstance(registry, list):
+            registry_roles = {
+                item.get("role") for item in registry if isinstance(item, dict)
+            }
+            if "project_state" not in registry_roles:
+                errors.append("project-state: registry must include project state")
+            if "project_overview" in registry_roles:
+                errors.append(
+                    "project-state: derived overview must not be hash/version registered "
+                    "because that creates a state-overview update cycle"
+                )
+
+    overview_text = (ROOT / "contracts/project-overview.template.md").read_text(
+        encoding="utf-8"
+    )
+    for invariant in (
+        "derived navigation view",
+        "sole scientific Gate authority",
+        "Do not create approval here",
+        "Planning status is execution state, not scientific approval",
+    ):
+        if invariant not in overview_text:
+            errors.append(f"project overview: missing boundary {invariant!r}")
 
     idea = load_yaml(ROOT / "contracts/idea-card.template.yaml", errors)
     require_keys(
@@ -985,11 +1182,15 @@ def validate_repository() -> list[str]:
         "upstreams.lock.yaml",
         "contracts/README.md",
         "requirements-dev.txt",
+        ".codex-plugin/plugin.json",
+        ".agents/plugins/marketplace.json",
+        "hooks/hooks.json",
     ):
         if not (ROOT / required).is_file():
             errors.append(f"missing root file: {required}")
 
     lock = load_yaml(ROOT / "upstreams.lock.yaml", errors)
+    errors.extend(validate_plugin_bundle())
     errors.extend(validate_vendor(lock))
     errors.extend(validate_contracts())
     return errors

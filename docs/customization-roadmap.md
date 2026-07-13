@@ -2,6 +2,14 @@
 
 This file records the second-round design questions; it does not activate unreviewed defaults.
 
+## Frozen foundation before personalization
+
+- Planning with Files is the default execution layer for non-trivial research tasks.
+- `.research/project-state.yaml` remains the sole scientific Gate authority.
+- `.research/project-overview.md` is a derived navigation view.
+- `.planning/<task-id>/` contains task plan, provisional findings, and progress only; verified results must be promoted into `.research/`.
+- The public Codex hook enforces these boundaries but remains read-only.
+
 ## Domain profiles
 
 ### Reinforcement learning

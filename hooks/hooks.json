@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/research-workflow-hook.js\" SessionStart",
+            "commandWindows": "node \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" SessionStart",
+            "timeout": 5,
+            "statusMessage": "Loading research project context..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/research-workflow-hook.js\" UserPromptSubmit",
+            "commandWindows": "node \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" UserPromptSubmit",
+            "timeout": 5,
+            "statusMessage": "Applying research workflow guard..."
+          }
+        ]
+      }
+    ]
+  }
+}

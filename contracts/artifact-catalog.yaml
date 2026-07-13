@@ -6,6 +6,13 @@ artifacts:
     canonical_path: .research/project-state.yaml
     template: contracts/project-state.template.yaml
     producer: research-orchestrator
+    authority: sole_gate_authority
+  - role: project_overview
+    canonical_path: .research/project-overview.md
+    template: contracts/project-overview.template.md
+    producer: research-orchestrator
+    authority: derived_navigation
+    allowed_as_gate_basis: false
   - role: idea_card
     canonical_path: .research/idea/idea_card.yaml
     template: contracts/idea-card.template.yaml

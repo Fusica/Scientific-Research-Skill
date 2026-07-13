@@ -9,10 +9,11 @@ Route work through explicit artifacts and approval gates. Treat the workflow as 
 
 ## Start from project state
 
-1. Inspect the repository, existing research artifacts, user instructions, and any domain or venue profile.
-2. If this is a multi-stage project and no state exists, initialize a project-local `.research/` directory from the artifact chain in `references/artifact-chain.md`.
-3. Record facts already supported by files separately from assumptions and open questions.
-4. Select the smallest stage that advances the project. Do not restart completed stages without evidence that their inputs changed.
+1. Inspect user instructions and `AGENTS.md`, then read `.research/project-overview.md`, `.research/project-state.yaml`, the active `.planning/<task-id>/` bundle, source-control changes, and the actual source artifacts. Project state wins if the overview is stale; verified files win over remembered chat context.
+2. If this is a multi-stage project and no state exists, initialize a project-local `.research/` directory from the artifact chain in `references/artifact-chain.md`, including the derived project overview.
+3. For every non-trivial research task, create or reuse `.planning/<task-id>/task_plan.md`, `findings.md`, and `progress.md` before substantive execution. Follow `references/planning-with-files.md`.
+4. Record facts already supported by files separately from assumptions, provisional findings, and open questions.
+5. Select the smallest stage that advances the project. Do not restart completed stages without evidence that their inputs changed.
 
 ## Route to the stage skill
 
@@ -51,15 +52,18 @@ can authorize either an initial submission or a revision/rebuttal release.
 - Mark unsupported, exploratory, conflicting, and negative evidence instead of deleting it.
 - Never invent a citation, result, implementation detail, or approval state.
 
-## Separate coordination notes from scientific records
+## Enforce the execution/science boundary
 
-`Planning with Files` is optional and useful for long, recoverable, or multi-agent execution. Put task coordination in `.planning/<task>/`; put durable scientific evidence and decisions in `.research/`. Do not treat a planning note as evidence merely because it exists on disk.
+Planning with Files is the default coordination layer for non-trivial research work. Put the current objective, steps, owners, provisional findings, failures, and progress in `.planning/<task-id>/`; put verified scientific evidence, specifications, runs, claims, and Gate decisions in `.research/`.
+
+Planning status never approves science. Promote a finding only after source or run verification, preserve its stable IDs and provenance in the canonical `.research/` artifact, link the promotion from `findings.md`, update project state when warranted, and then refresh `project-overview.md`. Read `references/planning-with-files.md` for the complete contract.
 
 ## Finish each turn with a handoff
 
 Report:
 
 - current stage and gate status;
+- active planning task and completed execution steps;
 - artifacts created or updated;
 - evidence-backed decisions;
 - unresolved risks or missing inputs;

@@ -21,5 +21,7 @@ jobs:
         run: python3 scripts/validate_repo.py
       - name: Run tests
         run: python3 -m unittest discover -s tests -v
+      - name: Run hook compatibility tests
+        run: node --test tests/hooks.test.js
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts tests

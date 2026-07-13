@@ -5,6 +5,7 @@ Use a project-local `.research/` directory unless the user or repository already
 | Stage | Canonical artifacts | Produced by | Approval |
 | --- | --- | --- | --- |
 | Intake/state | `project-state.yaml` | research-orchestrator | sole gate authority |
+| Intake/navigation | `project-overview.md` | research-orchestrator | derived view; no approval authority |
 | Idea | `idea/idea_card.yaml` | idea-evolution | Gate 1: idea freeze |
 | Literature | `literature/search_protocol.yaml`, `paper_registry.jsonl`, `evidence_matrix.jsonl`, `closest_work.md` | literature-evidence | supports Gate 1 |
 | Method | `method/method_contract.md` | method-formalization | Gate 2 |
@@ -25,9 +26,17 @@ Each approve or reopen decision records:
 
 Gate summaries point to the latest decision ID. Allowed states are `pending`, `approved`, `reopened`, and `not_applicable`. Gate 4 supports independent initial-submission and revision/rebuttal release decisions.
 
+`project-overview.md` mirrors project identity, scope, current stage, Gate decision IDs, canonical artifact pointers, bounded claim summaries, terminology, constraints, open decisions, and active planning tasks. It never creates approval, stores raw evidence, or replaces the claim ledger. Refresh it after material project-state or active-task changes; project state wins on conflict.
+
 ## Artifact and stage state
 
-The project state maps each canonical role to its actual path and stores artifact schema version, artifact version, content hash, and status. It also records active stages and transition history. Existing project files can satisfy a role without being renamed.
+The project state maps authoritative scientific roles to their actual paths and stores artifact schema version, artifact version, content hash, and status. It also records active stages and transition history. Existing project files can satisfy a role without being renamed.
+
+The derived overview remains cataloged but is not hash/version registered back into project state. This avoids a circular update where a state change regenerates overview and the overview hash then forces another state version.
+
+## Execution state
+
+Every non-trivial research task uses `.planning/<task-id>/task_plan.md`, `findings.md`, and `progress.md`. This bundle is the task execution authority but has no scientific Gate authority. Verified results move from planning into the canonical `.research/` artifact; they do not become evidence by remaining in a planning file.
 
 ## Feedback edges
 

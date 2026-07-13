@@ -99,6 +99,40 @@ class RepositoryTest(unittest.TestCase):
         self.assertEqual(len(roles), len(set(roles)))
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(catalog["gate_authority"], ".research/project-state.yaml")
+        overview = next(
+            record for record in records if record["role"] == "project_overview"
+        )
+        self.assertEqual(overview["authority"], "derived_navigation")
+        self.assertFalse(overview["allowed_as_gate_basis"])
+
+    def test_plugin_manifest_and_marketplace_versions_match(self) -> None:
+        manifest = json.loads(
+            (ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        marketplace = json.loads(
+            (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["name"], "scientific-research-skill")
+        self.assertEqual(marketplace["plugins"][0]["name"], manifest["name"])
+        self.assertEqual(marketplace["plugins"][0]["version"], manifest["version"])
+        self.assertEqual(
+            marketplace["plugins"][0]["source"],
+            {"source": "local", "path": "."},
+        )
+        self.assertNotIn("hooks", manifest)
+
+    def test_planning_is_default_but_not_gate_authority(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        orchestrator = (
+            ROOT / "skills/research-orchestrator/SKILL.md"
+        ).read_text(encoding="utf-8")
+        planning = (
+            ROOT / "skills/research-orchestrator/references/planning-with-files.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("default execution layer", agents)
+        self.assertIn("default coordination layer", orchestrator)
+        self.assertIn("no scientific Gate authority", planning)
+        self.assertIn("sole gate authority", agents)
 
     def test_new_claim_is_unassessed(self) -> None:
         ledger = yaml.safe_load(

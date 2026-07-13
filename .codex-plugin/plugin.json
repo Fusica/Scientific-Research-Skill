@@ -1,0 +1,28 @@
+{
+  "name": "scientific-research-skill",
+  "version": "0.2.0",
+  "description": "Auditable end-to-end research workflows with default file-based planning, scientific gates, and traceable artifacts.",
+  "author": {
+    "name": "Fusica",
+    "url": "https://github.com/Fusica"
+  },
+  "homepage": "https://github.com/Fusica/Scientific-Research-Skill",
+  "repository": "https://github.com/Fusica/Scientific-Research-Skill",
+  "license": "Apache-2.0",
+  "keywords": ["research", "planning", "machine-learning", "robotics", "reproducibility"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Scientific Research Skill",
+    "shortDescription": "Auditable research workflow with default planning",
+    "longDescription": "Coordinate research from idea formation through experiments, paper production, and reviewer revision with project-local planning, explicit evidence boundaries, and human-approved scientific gates.",
+    "developerName": "Fusica",
+    "category": "Education & Research",
+    "capabilities": ["Research planning", "Evidence traceability", "Reviewer revision"],
+    "websiteURL": "https://github.com/Fusica/Scientific-Research-Skill",
+    "defaultPrompt": [
+      "Inspect this research project and resume the next evidence-backed task.",
+      "Challenge this idea, search the background, and design decisive experiments.",
+      "Map these reviewer comments to evidence, edits, and point-by-point replies."
+    ]
+  }
+}
