@@ -113,10 +113,18 @@ class RepositoryTest(unittest.TestCase):
         for command in ("init", "status", "enable", "disable", "gate", "checkpoint", "doctor"):
             self.assertIn(command, result.stdout)
 
-    def test_root_license_and_provenance_remain(self) -> None:
+    def test_root_license_and_external_references_remain_link_only(self) -> None:
         self.assertIn("Copyright 2026 Fusica", (ROOT / "LICENSE").read_text())
-        self.assertTrue((ROOT / "THIRD_PARTY_NOTICES.md").is_file())
-        self.assertTrue((ROOT / "upstreams.lock.yaml").is_file())
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for url in (
+            "https://github.com/Galaxy-Dawn/claude-scholar",
+            "https://github.com/EvoScientist/EvoSkills",
+            "https://github.com/Yuan1z0825/nature-skills",
+            "https://github.com/lingzhi227/agent-research-skills",
+        ):
+            self.assertIn(url, readme)
+        for relative in ("vendor", "THIRD_PARTY_NOTICES.md", "upstreams.lock.yaml"):
+            self.assertFalse((ROOT / relative).exists(), relative)
 
 
 if __name__ == "__main__":

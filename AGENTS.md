@@ -6,6 +6,9 @@ Maintain one small Codex plugin that turns an explicitly enabled repository into
 traceable research workspace. Prefer a clear scientific boundary over additional
 workflow machinery.
 
+This `AGENTS.md` is repository-scoped maintainer guidance. It is not an installed
+Plugin component, a system-wide instruction file, or a source of runtime policy.
+
 ## Runtime architecture
 
 - `skills/research/SKILL.md` is the only public Skill entry point.
@@ -38,13 +41,15 @@ local to the current worktree by default.
 
 ## Repository changes
 
-- Keep vendored upstream material read-only. Local behavior belongs in
-  `skills/research`, `scripts`, and `hooks`.
+- Do not vendor upstream repositories or keep local source snapshots. External
+  reference repositories belong only as direct links in `README.md`; maintained
+  behavior belongs in `skills/research`, `scripts`, and `hooks`.
 - Keep `SKILL.md` concise and load only the current stage reference.
 - Change the shared policy rather than duplicating a rule in a stage reference,
   Hook, command, or README.
 - Use parallel agents only for independent paths, then review the integrated diff.
-- Preserve license and upstream provenance files when simplifying runtime code.
+- Preserve the root license. Re-express externally inspired behavior locally rather
+  than copying upstream source into this repository.
 
 ## Required validation
 

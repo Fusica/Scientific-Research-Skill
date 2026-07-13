@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -98,18 +97,12 @@ EXPECTED_SKILL_FILES = {
     "assets/memory.template.md",
 }
 
-EXPECTED_UPSTREAM_COMMITS = {
-    "claude-scholar": "6fa4540f2ceafeaa5c610532906fec5810ee4e19",
-    "evoskills": "29e2c67f12858829ad0900645432b340c3f77522",
-    "evoscientist": "49770949daa7ca4ef4744a2f089100f8b872b869",
-    "nature-skills": "4170a8a6262642841699c55d468e21ff70a2fe34",
-    "agent-research-skills": "9e6c085d65e313e475e921fdfe795ac11eb7589e",
-}
-VENDOR_ROOTS = {
-    "claude-scholar": ROOT / "vendor/claude-scholar",
-    "evoskills": ROOT / "vendor/evoskills",
-    "nature-skills": ROOT / "vendor/nature-skills",
-}
+EXTERNAL_REFERENCE_URLS = (
+    "https://github.com/Galaxy-Dawn/claude-scholar",
+    "https://github.com/EvoScientist/EvoSkills",
+    "https://github.com/Yuan1z0825/nature-skills",
+    "https://github.com/lingzhi227/agent-research-skills",
+)
 
 
 def load_json(path: Path, errors: list[str]) -> Any:
@@ -423,86 +416,29 @@ def validate_plugin() -> list[str]:
     for legacy in (ROOT / "contracts", ROOT / "profiles", ROOT / "docs"):
         if legacy.exists() and any(legacy.rglob("*")):
             errors.append(f"{legacy.name}: legacy runtime layer must remain removed")
-    return errors
 
-
-def selection_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.name not in {"LICENSE", "UPSTREAM.md"}
-        and "__pycache__" not in path.parts
-        and path.suffix != ".pyc"
-    ]
-    for path in sorted(files):
-        relative = path.relative_to(root).as_posix().encode()
-        digest.update(relative + b"\0" + hashlib.sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
-
-
-def selected_path_contains(selected: str, relative: str) -> bool:
-    return relative == selected or relative.startswith(selected.rstrip("/") + "/")
-
-
-def validate_vendor() -> list[str]:
-    errors: list[str] = []
-    lock = load_yaml(ROOT / "upstreams.lock.yaml", errors)
-    upstreams = lock.get("upstreams") if isinstance(lock, dict) else None
-    if not isinstance(upstreams, list):
-        return errors + ["upstreams.lock.yaml: expected upstreams list"]
-    entries = {
-        item.get("id"): item
-        for item in upstreams
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    if set(entries) != set(EXPECTED_UPSTREAM_COMMITS):
-        errors.append("upstreams.lock.yaml: audited upstream set changed")
-    for upstream_id, expected_commit in EXPECTED_UPSTREAM_COMMITS.items():
-        entry = entries.get(upstream_id, {})
-        if entry.get("commit") != expected_commit:
-            errors.append(f"upstreams.lock.yaml: {upstream_id} commit mismatch")
-    for upstream_id, root in VENDOR_ROOTS.items():
-        entry = entries.get(upstream_id, {})
-        selected = entry.get("selected")
-        if entry.get("integration") != "vendored_verbatim":
-            errors.append(f"{upstream_id}: expected vendored_verbatim")
-            continue
-        if not isinstance(selected, list) or not selected:
-            errors.append(f"{upstream_id}: missing selected paths")
-            continue
-        for relative in selected:
-            if not isinstance(relative, str) or not (root / relative).exists():
-                errors.append(f"{upstream_id}: selected path missing: {relative}")
-        for path in root.rglob("*"):
-            if not path.is_file() or path.name in {"LICENSE", "UPSTREAM.md"}:
-                continue
-            relative = path.relative_to(root).as_posix()
-            if not any(selected_path_contains(item, relative) for item in selected):
-                errors.append(f"{upstream_id}: unlisted vendored file: {relative}")
-        if entry.get("selection_sha256") != selection_digest(root):
-            errors.append(f"{upstream_id}: selection SHA-256 mismatch")
-    if (ROOT / "vendor/claude-scholar/skills/ml-paper-writing/templates").exists():
-        errors.append("Claude Scholar LPPL venue templates must remain excluded")
-    for path in (ROOT / "vendor").rglob("*"):
-        if path.is_symlink() or path.name == "__pycache__" or path.suffix == ".pyc":
-            errors.append(f"vendor: forbidden generated/symlink path {path.relative_to(ROOT)}")
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
     if "Copyright 2026 Fusica" not in license_text:
         errors.append("LICENSE: local project owner missing")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for url in EXTERNAL_REFERENCE_URLS:
+        if url not in readme:
+            errors.append(f"README.md: missing external reference {url}")
+    for stale in ("vendor", "THIRD_PARTY_NOTICES.md", "upstreams.lock.yaml"):
+        if (ROOT / stale).exists():
+            errors.append(f"{stale}: external references must remain link-only")
     return errors
 
 
 def main() -> int:
-    errors = validate_skill() + validate_plugin() + validate_vendor()
+    errors = validate_skill() + validate_plugin()
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(
         "Validated scientific-research-skill 1.0.0: one Skill, six stages, "
-        "four Gates, project-local state, five Hook events, and vendor provenance."
+        "four Gates, project-local state, five Hook events, and link-only external references."
     )
     return 0
 

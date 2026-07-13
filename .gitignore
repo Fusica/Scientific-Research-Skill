@@ -1,6 +1,13 @@
+# Local OS and editor state
 .DS_Store
+.idea/
+.vscode/
+
+# Python development environments and generated output
+.venv/
 __pycache__/
 *.py[cod]
-.venv/
 .pytest_cache/
 .coverage
+coverage.xml
+htmlcov/
