@@ -47,10 +47,15 @@ function approvedGate(id, releaseTarget = null) {
 }
 
 function reopenedGate(approveId, reopenId) {
-  const record = approvedGate(approveId, "initial_submission");
+  return reopenedGateFor("release", approveId, reopenId);
+}
+
+function reopenedGateFor(gate, approveId, reopenId) {
+  const releaseTarget = gate === "release" ? "initial_submission" : null;
+  const record = approvedGate(approveId, releaseTarget);
   record.status = "reopened";
   record.latest_decision_id = reopenId;
-  record.history.push({
+  const decision = {
     decision_id: reopenId,
     action: "reopen",
     previous_status: "approved",
@@ -59,8 +64,9 @@ function reopenedGate(approveId, reopenId) {
     actor: "test-owner",
     decided_at: "2026-07-13T09:00:00Z",
     artifact_refs: [],
-    release_target: "initial_submission",
-  });
+  };
+  if (releaseTarget !== null) decision.release_target = releaseTarget;
+  record.history.push(decision);
   return record;
 }
 
@@ -80,6 +86,121 @@ function makeState(overrides = {}) {
     updated_at: "2026-07-13T08:00:00Z",
   };
   return { ...state, ...overrides };
+}
+
+function stageTransition(fromStage, toStage, index) {
+  return {
+    from_stage: fromStage,
+    to_stage: toStage,
+    trigger: `test-transition:${fromStage}:${toStage}`,
+    timestamp: `2026-07-13T08:${String(index).padStart(2, "0")}:00Z`,
+  };
+}
+
+function stateAtStage(stage, options = {}) {
+  const gates = Object.fromEntries(policy.gate_order.map((gate) => [gate, pendingGate()]));
+  const stageHistory = [];
+  if (stage === "literature") {
+    stageHistory.push(stageTransition("idea", "literature", 1));
+  }
+  if (["method", "experiment_results", "paper", "revision"].includes(stage)) {
+    gates.idea_freeze = approvedGate("DEC-IDEA");
+    stageHistory.push(stageTransition("idea", "method", 1));
+  }
+  if (["experiment_results", "paper", "revision"].includes(stage)) {
+    gates.method_experiment_approval = approvedGate("DEC-METHOD");
+    stageHistory.push(stageTransition("method", "experiment_results", 2));
+  }
+  if (["paper", "revision"].includes(stage)) {
+    gates.claim_freeze = approvedGate("DEC-CLAIM");
+    stageHistory.push(stageTransition("experiment_results", "paper", 3));
+  }
+  if (stage === "revision") {
+    gates.release = options.releaseReopened
+      ? reopenedGate("DEC-RELEASE", "DEC-REOPEN")
+      : approvedGate("DEC-RELEASE", "initial_submission");
+    stageHistory.push(stageTransition("paper", "revision", 4));
+  }
+  return makeState({ current_stage: stage, gates, stage_history: stageHistory });
+}
+
+function stateForGateStatus(gate, status) {
+  const requiredStage = {
+    idea_freeze: "idea",
+    method_experiment_approval: "method",
+    claim_freeze: "experiment_results",
+    release: "paper",
+  }[gate];
+  const advancedStage = {
+    idea_freeze: "method",
+    method_experiment_approval: "experiment_results",
+    claim_freeze: "paper",
+    release: "revision",
+  }[gate];
+  if (status === "pending") return stateAtStage(requiredStage);
+  if (status === "approved") return stateAtStage(advancedStage);
+  const state = gate === "release"
+    ? stateAtStage("revision", { releaseReopened: true })
+    : stateAtStage(requiredStage);
+  state.gates[gate] = reopenedGateFor(gate, `DEC-${gate}-APPROVE`, `DEC-${gate}-REOPEN`);
+  return state;
+}
+
+function assertBlockOutput(output, label = "") {
+  assert.deepEqual(Object.keys(output).sort(), ["decision", "reason"], label);
+  assert.equal(output.decision, "block", label);
+  assert.equal(typeof output.reason, "string", label);
+  assert.ok(output.reason.trim(), label);
+  assert.ok(output.reason.length <= 1800, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "continue"), false, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "systemMessage"), false, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "suppressOutput"), false, label);
+}
+
+function assertWarningOutput(output, label = "") {
+  assert.deepEqual(Object.keys(output).sort(), ["continue", "systemMessage"], label);
+  assert.equal(output.continue, true, label);
+  assert.equal(typeof output.systemMessage, "string", label);
+  assert.ok(output.systemMessage.trim(), label);
+  assert.ok(output.systemMessage.length <= 1800, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "decision"), false, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "reason"), false, label);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "suppressOutput"), false, label);
+}
+
+function serializedObjectAtSize(value, targetSize, paddingKey = "stress_padding") {
+  const candidate = { ...value, [paddingKey]: "" };
+  const base = JSON.stringify(candidate);
+  assert.ok(base.length <= targetSize, `base JSON exceeds target ${targetSize}`);
+  candidate[paddingKey] = "x".repeat(targetSize - base.length);
+  const serialized = JSON.stringify(candidate);
+  assert.equal(serialized.length, targetSize);
+  return serialized;
+}
+
+function serializedObjectAtByteSize(value, targetSize, paddingKey = "stress_padding") {
+  const candidate = { ...value, [paddingKey]: "" };
+  const base = JSON.stringify(candidate);
+  const paddingBytes = targetSize - Buffer.byteLength(base, "utf8");
+  assert.ok(paddingBytes >= 0, `base JSON exceeds target ${targetSize}`);
+  candidate[paddingKey] = `${"é".repeat(Math.floor(paddingBytes / 2))}${
+    "x".repeat(paddingBytes % 2)
+  }`;
+  const serialized = JSON.stringify(candidate);
+  assert.equal(Buffer.byteLength(serialized, "utf8"), targetSize);
+  return serialized;
+}
+
+function serializedStringFieldAtSize(value, field, suffix, targetSize) {
+  const candidate = { ...value, [field]: "" };
+  const base = JSON.stringify(candidate);
+  const encodedSuffixSize = JSON.stringify(suffix).length - 2;
+  const paddingSize = targetSize - base.length - encodedSuffixSize;
+  assert.ok(paddingSize >= 0, `base JSON exceeds target ${targetSize}`);
+  candidate[field] = `${"x".repeat(paddingSize)}${suffix}`;
+  const serialized = JSON.stringify(candidate);
+  assert.equal(serialized.length, targetSize);
+  return serialized;
 }
 
 function createProject(options = {}) {
@@ -178,6 +299,8 @@ function runRaw(event, cwd, raw) {
   assert.equal(result.error, undefined, result.error && result.error.message);
   assert.equal(result.signal, null, "Hook must not hang or be terminated by a signal");
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "", "Hook must not use stderr for ordinary outcomes");
+  assert.notEqual(result.stdout.trim(), "", "Hook must emit one JSON object");
   return JSON.parse(result.stdout);
 }
 
@@ -226,6 +349,40 @@ test("Hook config registers five command-only handlers through PLUGIN_ROOT", () 
   }
   assert.equal(document.hooks.PreToolUse[0].matcher, ".*");
   assert.equal(document.hooks.PostToolUse[0].matcher, ".*");
+  assert.equal(document.hooks.SessionStart[0].matcher, "startup|resume|clear|compact");
+  assert.equal(Object.prototype.hasOwnProperty.call(document.hooks.UserPromptSubmit[0], "matcher"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(document.hooks.Stop[0], "matcher"), false);
+  for (const event of events) {
+    assert.match(document.hooks[event][0].hooks[0].commandWindows, new RegExp(`${event}$`));
+  }
+  const stopStatus = document.hooks.Stop[0].hooks[0].statusMessage;
+  assert.match(stopStatus, /mechanical research workflow consistency/i);
+  assert.doesNotMatch(stopStatus, /audit/i);
+});
+
+test("configured Unix Hook command executes when PLUGIN_ROOT contains spaces", () => {
+  const fixture = createProject();
+  const temporaryPluginParent = fs.mkdtempSync(path.join(os.tmpdir(), "hook-command-space-"));
+  const spacedPluginRoot = path.join(temporaryPluginParent, "plugin root with spaces");
+  fs.symlinkSync(pluginRoot, spacedPluginRoot, "dir");
+  const document = JSON.parse(
+    fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8"),
+  );
+  const command = document.hooks.SessionStart[0].hooks[0].command;
+  const result = spawnSync("/bin/sh", ["-c", command], {
+    cwd: fixture.project,
+    env: { ...process.env, PLUGIN_ROOT: spacedPluginRoot },
+    input: JSON.stringify(officialInput("SessionStart", fixture.project)),
+    encoding: "utf8",
+    timeout: 6000,
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.hookSpecificOutput.hookEventName, "SessionStart");
+  cleanup(fixture.temporary);
+  cleanup(temporaryPluginParent);
 });
 
 test("ordinary, missing, malformed, and disabled projects are strict no-ops", () => {
@@ -356,7 +513,7 @@ test("SessionStart resolves CODEX_PLUGIN_ROOT and CLAUDE_PLUGIN_ROOT fallbacks",
   cleanup(fixture.temporary);
 });
 
-test("UserPromptSubmit injects a compact current-stage boundary for research work", () => {
+test("UserPromptSubmit injects the stage boundary and pre-answer semantic audit", () => {
   const gates = Object.fromEntries(policy.gate_order.map((gate) => [gate, pendingGate()]));
   gates.idea_freeze = approvedGate("DEC-IDEA");
   gates.method_experiment_approval = approvedGate("DEC-METHOD");
@@ -369,7 +526,7 @@ test("UserPromptSubmit injects a compact current-stage boundary for research wor
   assert.deepEqual(Object.keys(output), ["hookSpecificOutput"]);
   assert.equal(output.hookSpecificOutput.hookEventName, "UserPromptSubmit");
   const context = output.hookSpecificOutput.additionalContext;
-  assert.ok(context.length <= 1200);
+  assert.ok(context.length <= 2600);
   assert.match(context, /Current stage: experiment_results/);
   assert.match(context, /PROMPT RELEVANT/);
   assert.match(context, /Current-stage prohibited actions/);
@@ -379,6 +536,67 @@ test("UserPromptSubmit injects a compact current-stage boundary for research wor
   assert.match(context, /project-root research\/, contracts\/, or artifacts\//);
   assert.match(context, /policy\.yaml review_language/);
   assert.match(context, /Use the \$research Skill/);
+  assert.match(context, /Before the first user-facing final answer/);
+  assert.match(context, /silently apply the canonical semantic audit/);
+  assert.match(context, /Claims, numbers, artifacts/);
+  assert.match(context, /Claim scope and certainty/);
+  assert.match(context, /current stage, required artifacts, transition, and Gate state/);
+  assert.match(context, /Unresolved risks are stated/);
+  assert.match(context, /one complete, self-contained answer/);
+  assert.match(context, /Do not emit a standalone audit addendum/);
+  for (const invariant of policy.semantic_audit) {
+    assert.ok(context.includes(invariant), invariant);
+  }
+  assert.doesNotMatch(context, /beginning with.*Stop Hook Review/i);
+  cleanup(fixture.temporary);
+});
+
+test("the original Stop replacement incident is locked as an end-to-end regression", () => {
+  const fixture = createProject({ state: stateAtStage("experiment_results") });
+  const promptOutput = runHook("UserPromptSubmit", fixture.project, {
+    prompt: "那么现在 gate 是否通过，是否可以 method 冻结，进入 exp 或者进入 revision？",
+  });
+  const context = promptOutput.hookSpecificOutput.additionalContext;
+  for (const invariant of policy.semantic_audit) assert.ok(context.includes(invariant));
+  assert.match(context, /one complete, self-contained answer/);
+  assert.match(context, /Do not emit a standalone audit addendum/);
+  assert.doesNotMatch(context, /Return only|preceding assistant answer must remain unchanged|Finish after the audit addendum/);
+
+  const originalAnswer = [
+    "结论：Method Gate 已通过，Method 已冻结，并且项目已经进入 experiment_results 阶段；目前不能直接进入正式的 revision 阶段。",
+    "当前状态：",
+    "method_experiment_approval：approved",
+    "冻结文件：method_approval_package_v2.md",
+    "审批记录：DEC-20260714T095421Z-47A62781",
+    "当前阶段：experiment_results",
+    "下一道 Gate：claim_freeze，目前为 pending",
+    "状态检查：0 errors / 0 warnings",
+    "这里的 experiment_results 不代表要求你重新开展整套实验。",
+    "正式流程是：experiment_results → 审批 claim_freeze → paper → 审批 release → revision。",
+    "因此，现在可以立即继续处理审稿回复和相关证据，但不能把工作流状态直接跳到 revision。",
+  ].join("\n");
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: originalAnswer,
+    stop_hook_active: false,
+  }), {});
+
+  const legacyOnly = runHook("Stop", fixture.project, {
+    last_assistant_message: "[Stop Hook Review] 审核通过：未发现实质性问题。",
+    stop_hook_active: false,
+  });
+  assertWarningOutput(legacyOnly, "legacy-only response");
+
+  const contradiction = runHook("Stop", fixture.project, {
+    last_assistant_message: "Current stage: revision",
+    stop_hook_active: false,
+  });
+  assertBlockOutput(contradiction, "first contradictory response");
+  assert.match(contradiction.reason, /one complete, self-contained corrected answer/);
+  assert.doesNotMatch(contradiction.reason, /Return only|must remain unchanged|\[Stop Hook Review\]/);
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "Current stage: revision",
+    stop_hook_active: true,
+  }), {});
   cleanup(fixture.temporary);
 });
 
@@ -748,91 +966,12 @@ test("PostToolUse accepts an explicitly reopened downstream Gate and rejects poi
   cleanup(fixture.temporary);
 });
 
-test("Stop preserves the preceding answer and requests one audit addendum", () => {
-  const fixture = createProject();
-  const material = "The experiment is completed and verified. Accuracy improved by 12%, all citations were checked, and the evidence proves the claim is novel.";
-  const output = runHook("Stop", fixture.project, {
-    last_assistant_message: material,
-    stop_hook_active: false,
-  });
-  assert.deepEqual(Object.keys(output).sort(), ["decision", "reason"]);
-  assert.equal(output.decision, "block");
-  assert.ok(output.reason.length <= 1800);
-  assert.match(output.reason, /single stop-time semantic audit/);
-  assert.match(output.reason, /preceding assistant answer must remain unchanged/);
-  assert.match(output.reason, /do not reproduce, rewrite, replace, or silently correct it/);
-  assert.match(output.reason, /Return only a concise, evidence-bounded audit addendum/);
-  assert.match(output.reason, /beginning with `\[Stop Hook Review\]`/);
-  assert.doesNotMatch(output.reason, /corrected, evidence-bounded user-facing answer/);
-  assert.match(output.reason, /applicable policy invariants/);
-  assert.match(output.reason, /Claims, numbers, artifacts/);
-  assert.match(output.reason, /Claim scope and certainty/);
-  assert.match(output.reason, /Gate to exit: idea_freeze \(pending\)/);
-  cleanup(fixture.temporary);
-});
-
-test("Stop skips ordinary answers and never loops when already active", () => {
-  const fixture = createProject();
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "好的。",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "Refactored the parser, simplified its control flow, and all unit tests pass.",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "已经解释了函数细节并修复代码报错，单元测试通过。",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "已重构实验脚本，单元测试通过，未改变算法逻辑。",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "The experiment script refactor is complete and all unit tests pass.",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "The loss function implementation is complete and its unit tests pass.",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "The map function implementation improved and its unit tests pass.",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "论文生成脚本已更新，单元测试通过。",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "The manuscript parser is ready and all unit tests pass.",
-    stop_hook_active: false,
-  }), {});
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "The researchctl parser was updated and its tests pass.",
-    stop_hook_active: false,
-  }), {});
-
-  assert.deepEqual(runHook("Stop", fixture.project, {
-    last_assistant_message: "结果已经完成并验证，准确率提升 12%。",
-    stop_hook_active: true,
-  }), {});
-
-  const camelInput = officialInput("Stop", fixture.project, {
-    last_assistant_message: "A material research result was completed and verified.",
-  });
-  delete camelInput.stop_hook_active;
-  camelInput.stopHookActive = true;
-  assert.deepEqual(runHook("Stop", fixture.project, {}, { input: camelInput }), {});
-  cleanup(fixture.temporary);
-});
-
-test("Stop audits research deliverables and Gate claims", () => {
+test("Stop leaves ordinary and material answers untouched after the pre-answer audit", () => {
   const fixture = createProject();
   for (const last_assistant_message of [
+    "好的。",
+    "Refactored the parser, simplified its control flow, and all unit tests pass.",
     "mAP improved by 2.3%, which supports the central claim.",
-    "The claim ledger is completed and the release Gate is approved.",
     "The paper was revised.",
     "The paper parser is ready, and the paper itself was revised.",
     "I edited the manuscript after checking its citations.",
@@ -846,18 +985,644 @@ test("Stop audits research deliverables and Gate claims", () => {
       last_assistant_message,
       stop_hook_active: false,
     });
-    assert.equal(output.decision, "block", last_assistant_message);
+    assert.deepEqual(output, {}, last_assistant_message);
   }
   cleanup(fixture.temporary);
 });
 
-test("Stop audits short Chinese material claims", () => {
+test("Stop warns non-blockingly when a response is only a legacy audit addendum", () => {
   const fixture = createProject();
   const output = runHook("Stop", fixture.project, {
-    last_assistant_message: "结果已经完成并验证，准确率提升 12%。",
+    last_assistant_message: "[Stop Hook Review] 审核通过：未发现实质性问题。",
     stop_hook_active: false,
   });
-  assert.equal(output.decision, "block");
+  assert.deepEqual(Object.keys(output).sort(), ["continue", "systemMessage"]);
+  assert.equal(output.continue, true);
+  assert.match(output.systemMessage, /legacy standalone \[Stop Hook Review\]/);
+  assert.match(output.systemMessage, /did not request another model turn/);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "decision"), false);
+  cleanup(fixture.temporary);
+});
+
+test("Stop reports invalid workflow state without changing the assistant answer", () => {
+  const fixture = createProject({
+    state: makeState({ stage_history: "not-an-array" }),
+  });
+  const output = runHook("Stop", fixture.project, {
+    last_assistant_message: "Current stage: idea",
+    stop_hook_active: false,
+  });
+  assert.deepEqual(Object.keys(output).sort(), ["continue", "systemMessage"]);
+  assert.equal(output.continue, true);
+  assert.match(output.systemMessage, /failed mechanical validation/);
+  assert.match(output.systemMessage, /stage_history must be an array/);
+  assert.match(output.systemMessage, /researchctl doctor/);
+  assert.match(output.systemMessage, /No additional model turn was requested/);
+  cleanup(fixture.temporary);
+});
+
+test("Stop blocks only explicit current-stage or Gate contradictions", () => {
+  const gates = Object.fromEntries(policy.gate_order.map((gate) => [gate, pendingGate()]));
+  gates.idea_freeze = approvedGate("DEC-IDEA");
+  gates.method_experiment_approval = approvedGate("DEC-METHOD");
+  const fixture = createProject({
+    state: makeState({
+      current_stage: "experiment_results",
+      gates,
+      stage_history: [
+        {
+          from_stage: "idea",
+          to_stage: "method",
+          trigger: "gate:idea_freeze:approve:DEC-IDEA",
+          timestamp: "2026-07-13T08:00:00Z",
+        },
+        {
+          from_stage: "method",
+          to_stage: "experiment_results",
+          trigger: "gate:method_experiment_approval:approve:DEC-METHOD",
+          timestamp: "2026-07-13T08:00:00Z",
+        },
+      ],
+    }),
+  });
+
+  for (const accurate of [
+    "Current stage: experiment_results\nmethod_experiment_approval: approved\nGate to exit: claim_freeze (pending)",
+    "Current stage: __experiment_results__",
+    "Current stage: _experiment_results_",
+    "当前阶段：experiment_results\n下一道 Gate：claim_freeze，目前为 pending\nclaim_freeze 待审批",
+    "Do not claim \"claim_freeze: approved\"; state remains pending.",
+    "After claim_freeze is approved, the workflow may enter paper.",
+    "```text\nclaim_freeze: approved\n```",
+    "````text\n```\nCurrent stage: revision\n```\n````",
+    "~~~text\nCurrent stage: revision\n~~~",
+    "    Current stage: revision",
+    "> claim_freeze: approved",
+    "`claim_freeze: approved`",
+    "`claim_freeze: approved` is the incorrect example.",
+    "claim_freeze: approved?",
+    "Current stage: revision would be wrong.",
+    "Current stage: revision? No.",
+    "Current stage: revision? Not according to state.",
+    "Current stage: revision is not correct; it remains experiment_results.",
+    "Current stage: revision only after release is approved.",
+    "Current stage: revision provided that release is approved.",
+    "Current stage: revision assuming release approval.",
+    "Current stage: revision subject to release approval.",
+    "Current stage: revision; this is wrong.",
+    "Current stage: revision isn't correct.",
+    "Current stage: revision isn't right.",
+    "Current stage: revision is an example.",
+    "Current stage: revision is an illustration.",
+    "Gate to exit: release (pending) is an invalid example.",
+    "| Gate | Required status |\n| release | approved |",
+    "Release approved artifacts only after review.",
+    "release pending work is documented.",
+    "Incorrect examples:\n- claim_freeze: approved\n- Current stage: revision",
+    "错误示例：\n- 当前阶段：revision\n- claim_freeze 已批准",
+    "For example:\nCurrent stage: revision\nclaim_freeze: approved",
+    "For instance:\nCurrent stage: revision\nclaim_freeze: approved",
+    "e.g.,\nCurrent stage: revision\nclaim_freeze: approved",
+    "Example output:\nCurrent stage: revision\nclaim_freeze: approved",
+    "例如：\n当前阶段：revision\nclaim_freeze 已批准",
+    "比如：\n当前阶段：revision\nclaim_freeze 已批准",
+    "以下为错误示例：\n当前阶段：revision\nclaim_freeze 已批准",
+    "Examples (invalid):\nCurrent stage: revision\nclaim_freeze: approved",
+    "Hypothetical:\nCurrent stage: revision\nclaim_freeze: approved",
+    "Examples below:\nCurrent stage: revision\nclaim_freeze: approved",
+    "Example table:\n\n| Gate | Current status |\n| --- | --- |\n| claim_freeze | approved |",
+    "Expected output:\n\nGate | Current status\n--- | ---\nclaim_freeze | approved",
+    "错误输出：\n当前阶段：revision\nclaim_freeze 已批准",
+    "假设如下：\n当前阶段：revision\nclaim_freeze 已批准",
+    "当前阶段：revision？不是。",
+    "当前阶段：revision，并不正确。",
+    "当前阶段：revision，是错误的。",
+    "当前阶段：revision，不对。",
+    "当前阶段：revision，并非如此。",
+    "当前阶段：revision，是错的。",
+    "当前阶段：revision，不是真的。",
+    "当前阶段：revision 仅在 release 批准后才能进入。",
+    "Incorrect example: Current stage: paper; claim_freeze: approved.",
+    "Do not claim Current stage: paper; claim_freeze: approved.",
+    "If release is approved; Current stage: revision.",
+    "Do not write \"foo; Current stage: revision\".",
+    "Example: (foo; claim_freeze: approved).",
+    "Incorrect literal: `foo; claim_freeze: approved`.",
+    "The literal is 'foo; Current stage: revision'.",
+    "The literal is 'isn't valid; Current stage: revision'.",
+    "不要写成“foo；当前阶段：revision”。",
+    "The following is incorrect, Current stage: revision.",
+    "The following is incorrect. Current stage: revision.",
+    "For example. Current stage: revision.",
+    "e.g. Current stage: revision.",
+    "Example. Current stage: revision.",
+    "**`claim_freeze: approved`**",
+    "    | Gate | Current status |\n    | --- | --- |\n    | claim_freeze | approved |",
+    "\t| Gate | Current status |\n\t| --- | --- |\n\t| claim_freeze | approved |",
+    "> | Gate | Current status |\n> | --- | --- |\n> | claim_freeze | approved |",
+    "`Gate | Current status`\n`--- | ---`\n`claim_freeze | approved`",
+    "```text\n    ```\nCurrent stage: revision\n```",
+    "| Gate | Current status |\n| --- | --- |\n| claim_freeze | pending |",
+    "Gate | Current status\n--- | ---\nclaim_freeze | pending",
+    "| Gate | Current status |\n| --- | --- |\n| claim_freeze | pending |\n| Gate | Required status |\n| --- | --- |\n| claim_freeze | approved |",
+    "| Field | Current value |\n| --- | --- |\n| Current stage | experiment_results |",
+  ]) {
+    assert.deepEqual(runHook("Stop", fixture.project, {
+      last_assistant_message: accurate,
+      stop_hook_active: false,
+    }), {}, accurate);
+  }
+
+  for (const contradiction of [
+    "Current stage: revision",
+    "**Current stage:** revision",
+    "Current stage: **revision**",
+    "- **Current stage:** revision",
+    "1. Current stage: revision",
+    "Current stage: revision — Review and revision",
+    "Current stage: revision — review will start next.",
+    "Current stage: revision. Next action is submission.",
+    "Current stage: revision. What next?",
+    "Current stage: revision; claim_freeze: approved.",
+    "Current stage: experiment_results; claim_freeze: approved.",
+    "Current stage: experiment_results. claim_freeze: approved.",
+    "当前阶段：experiment_results。claim_freeze：已批准。",
+    "Current stage: experiment_results, claim_freeze: approved.",
+    "Current stage: experiment_results — claim_freeze: approved.",
+    "If you want details, ask me. Current stage: revision.",
+    "Do not claim unsupported numbers. Current stage: revision.",
+    "Current stage: revision after claim_freeze approval.",
+    "Current workflow stage: revision",
+    "Current-stage: revision",
+    "Current stage — revision",
+    "Current research stage: paper",
+    "当前阶段：paper",
+    "当前工作流阶段：paper",
+    "claim_freeze: approved",
+    "- **claim_freeze:** approved",
+    "claim_freeze (approved)",
+    "claim_freeze: approved; next step is paper.",
+    "claim_freeze: approved because the next step is paper.",
+    "claim_freeze: approved. Continue?",
+    "claim_freeze: approved after human review.",
+    "claim_freeze: approved when the review finished.",
+    "claim_freeze approved",
+    "claim_freeze approved after human review.",
+    "claim_freeze approved because the owner signed.",
+    "claim_freeze approved — current",
+    "claim_freeze approved today.",
+    "claim_freeze approved by the owner.",
+    "claim_freeze approved and recorded.",
+    "claim_freeze: （approved）",
+    "claim_freeze 已批准",
+    "claim_freeze：已通过",
+    "Gate to exit: claim_freeze (approved)",
+    "Gate to exit: release (pending)",
+    "Gate to exit: release — pending",
+    "The next Gate is release",
+    "下一道 Gate 是 release",
+    "下一道 Gate：release（pending）",
+    "下一道 Gate：claim_freeze，目前为 approved",
+    "Current stage: *revision*",
+    "Current stage: _revision_",
+    "Current stage: __revision__",
+    "Current stage: __experiment_results__，claim_freeze: approved.",
+    "__claim_freeze__: approved",
+    "_claim_freeze_: approved",
+    "Current stage: revision? Yes.",
+    "Current stage: revision? Correct.",
+    "Current stage: revision? Yep.",
+    "Current stage: revision? Exactly.",
+    "当前阶段：revision（当前）",
+    "当前阶段：revision。下一步呢？",
+    "当前阶段：revision？是。",
+    "当前阶段：revision？是的。",
+    "当前阶段：revision？对的。",
+    "The reviewers' notes are ready. Current stage: revision.",
+    "The users' report is ready; Current stage: revision.",
+    "It's ready. Current stage: revision.",
+    "Intro\u2028Current stage: revision",
+    "Intro\u2029Current stage: revision",
+    "Intro\u0085Current stage: revision",
+    "Incorrect examples:\n- Current stage: paper\nActual status:\nCurrent stage: revision",
+    "Incorrect examples:\n- Current stage: paper\n## Actual state\nCurrent stage: revision",
+    "错误示例：\n- 当前阶段：paper\n实际状态：\n当前阶段：revision",
+    "| Gate | Current status |\n| --- | --- |\n| claim_freeze | approved |",
+    "| Gate | 当前状态 |\n| --- | --- |\n| claim_freeze | 已批准 |",
+    "Gate | Current status\n--- | ---\nclaim_freeze | approved",
+    "| Field | Current value |\n| --- | --- |\n| Current stage | revision |",
+    "    ```text\n    code\nCurrent stage: revision",
+  ]) {
+    const output = runHook("Stop", fixture.project, {
+      last_assistant_message: contradiction,
+      stop_hook_active: false,
+    });
+    assert.deepEqual(Object.keys(output).sort(), ["decision", "reason"], contradiction);
+    assert.equal(output.decision, "block", contradiction);
+    assert.ok(output.reason.length <= 1800);
+    assert.match(output.reason, /explicit mechanical contradiction/);
+    assert.match(output.reason, /\.research\/state\.json/);
+    assert.match(output.reason, /one complete, self-contained corrected answer/);
+    assert.match(output.reason, /do not return a standalone audit addendum/);
+    assert.doesNotMatch(output.reason, /\[Stop Hook Review\]/);
+  }
+
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "Current stage: revision\nclaim_freeze: approved",
+    stop_hook_active: true,
+  }), {});
+
+  const camelInput = officialInput("Stop", fixture.project, {
+    last_assistant_message: "Current stage: revision",
+  });
+  delete camelInput.stop_hook_active;
+  camelInput.stopHookActive = true;
+  assert.deepEqual(runHook("Stop", fixture.project, {}, { input: camelInput }), {});
+  cleanup(fixture.temporary);
+});
+
+test("Stop checks every actual and asserted workflow stage in English and Chinese", () => {
+  for (const actualStage of policy.stage_order) {
+    const fixture = createProject({ state: stateAtStage(actualStage) });
+    for (const assertedStage of policy.stage_order) {
+      for (const message of [
+        `Current stage: ${assertedStage}`,
+        `当前工作流阶段：${assertedStage}`,
+      ]) {
+        const output = runHook("Stop", fixture.project, {
+          last_assistant_message: message,
+          stop_hook_active: false,
+        });
+        if (assertedStage === actualStage) {
+          assert.deepEqual(output, {}, `${actualStage}: ${message}`);
+        } else {
+          assertBlockOutput(output, `${actualStage}: ${message}`);
+          assert.match(output.reason, new RegExp(`current_stage=${assertedStage}`));
+          assert.match(output.reason, new RegExp(`says ${actualStage}`));
+        }
+      }
+    }
+    cleanup(fixture.temporary);
+  }
+});
+
+test("Stop checks every stage exit Gate including the literature none boundary", () => {
+  const assertedTargets = [...policy.gate_order, "none"];
+  for (const actualStage of policy.stage_order) {
+    const fixture = createProject({ state: stateAtStage(actualStage) });
+    const expected = policy.stages[actualStage].gate_to_exit || "none";
+    for (const asserted of assertedTargets) {
+      for (const message of [
+        `Gate to exit: ${asserted}`,
+        `下一道 Gate：${asserted === "none" ? "无" : asserted}`,
+      ]) {
+        const output = runHook("Stop", fixture.project, {
+          last_assistant_message: message,
+          stop_hook_active: false,
+        });
+        if (asserted === expected) {
+          assert.deepEqual(output, {}, `${actualStage}: ${message}`);
+        } else {
+          assertBlockOutput(output, `${actualStage}: ${message}`);
+          assert.match(output.reason, new RegExp(`gate_to_exit=${asserted}`));
+          assert.match(output.reason, new RegExp(`require ${expected}`));
+        }
+      }
+    }
+    cleanup(fixture.temporary);
+  }
+});
+
+test("Stop checks all canonical Gate statuses and Chinese aliases", () => {
+  const statuses = policy.state_contract.gate_statuses;
+  const chinese = { pending: "待审批", approved: "已批准", reopened: "已重开" };
+  for (const gate of policy.gate_order) {
+    for (const actualStatus of statuses) {
+      const fixture = createProject({ state: stateForGateStatus(gate, actualStatus) });
+      for (const assertedStatus of statuses) {
+        for (const message of [
+          `${gate}: ${assertedStatus}`,
+          `${gate}：${chinese[assertedStatus]}`,
+        ]) {
+          const output = runHook("Stop", fixture.project, {
+            last_assistant_message: message,
+            stop_hook_active: false,
+          });
+          if (assertedStatus === actualStatus) {
+            assert.deepEqual(output, {}, `${gate}/${actualStatus}: ${message}`);
+          } else {
+            assertBlockOutput(output, `${gate}/${actualStatus}: ${message}`);
+            assert.match(output.reason, new RegExp(`${gate}=${assertedStatus}`));
+            assert.match(output.reason, new RegExp(`says ${actualStatus}`));
+          }
+        }
+      }
+      if (actualStatus === "approved") {
+        assert.deepEqual(runHook("Stop", fixture.project, {
+          last_assistant_message: `${gate} Gate 已通过`,
+          stop_hook_active: false,
+        }), {}, `${gate} approved alias`);
+      }
+      cleanup(fixture.temporary);
+    }
+  }
+});
+
+test("Stop output precedence and aliases are deterministic", () => {
+  const fixture = createProject({ state: stateAtStage("experiment_results") });
+  const contradiction = "Current stage: revision";
+
+  for (const activeInput of [
+    { stop_hook_active: true },
+    { stopHookActive: true, stop_hook_active: undefined },
+  ]) {
+    const input = officialInput("Stop", fixture.project, {
+      last_assistant_message: contradiction,
+    });
+    if (activeInput.stop_hook_active === undefined) delete input.stop_hook_active;
+    Object.assign(input, activeInput);
+    assert.deepEqual(runHook("Stop", fixture.project, {}, { input }), {});
+  }
+
+  for (const notBooleanTrue of ["true", 1, false, null]) {
+    const output = runHook("Stop", fixture.project, {
+      last_assistant_message: contradiction,
+      stop_hook_active: notBooleanTrue,
+    });
+    assertBlockOutput(output, `stop_hook_active=${String(notBooleanTrue)}`);
+  }
+
+  const snakeWins = officialInput("Stop", fixture.project, {
+    last_assistant_message: contradiction,
+    stop_hook_active: false,
+  });
+  snakeWins.stopHookActive = true;
+  assertBlockOutput(runHook("Stop", fixture.project, {}, { input: snakeWins }), "snake precedence");
+
+  const camelMessage = officialInput("Stop", fixture.project, { stop_hook_active: false });
+  delete camelMessage.last_assistant_message;
+  camelMessage.lastAssistantMessage = contradiction;
+  assertBlockOutput(runHook("Stop", fixture.project, {}, { input: camelMessage }), "camel message");
+
+  const contradictionBeforeLegacy = runHook("Stop", fixture.project, {
+    last_assistant_message: "[Stop Hook Review] audit passed\nCurrent stage: revision",
+    stop_hook_active: false,
+  });
+  assertBlockOutput(contradictionBeforeLegacy, "contradiction outranks legacy marker");
+
+  for (const emptyMessage of ["", "   ", null, 42, {}, []]) {
+    assert.deepEqual(runHook("Stop", fixture.project, {
+      last_assistant_message: emptyMessage,
+      stop_hook_active: false,
+    }), {});
+  }
+  cleanup(fixture.temporary);
+
+  const invalidFixture = createProject({
+    state: makeState({ stage_history: "not-an-array" }),
+  });
+  assert.deepEqual(runHook("Stop", invalidFixture.project, {
+    last_assistant_message: "[Stop Hook Review] audit passed\nCurrent stage: revision",
+    stop_hook_active: true,
+  }), {}, "stop_hook_active outranks invalid state and legacy marker");
+  cleanup(invalidFixture.temporary);
+});
+
+test("Stop invalid-state warning outranks contradictions and legacy markers", () => {
+  const cases = [
+    { state: makeState({ stage_history: "not-an-array" }), memory: undefined },
+    { state: makeState({ gates: { ...makeState().gates, claim_freeze: { status: "approved", latest_decision_id: null, history: [] } } }), memory: undefined },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const fixture = createProject({ state: item.state, memory: item.memory });
+    for (const message of [
+      "Current stage: revision",
+      "[Stop Hook Review] audit passed",
+      "[Stop Hook Review] audit passed\nCurrent stage: revision",
+    ]) {
+      const output = runHook("Stop", fixture.project, {
+        last_assistant_message: message,
+        stop_hook_active: false,
+      });
+      assertWarningOutput(output, `invalid case ${index}: ${message}`);
+      assert.match(output.systemMessage, /failed mechanical validation/);
+    }
+    cleanup(fixture.temporary);
+  }
+
+  const missingMemory = createProject({ withMemory: false });
+  assertWarningOutput(runHook("Stop", missingMemory.project, {
+    last_assistant_message: "Current stage: revision",
+    stop_hook_active: false,
+  }), "missing memory");
+  cleanup(missingMemory.temporary);
+});
+
+test("Stop recognizes legacy audit markers without requesting a model continuation", () => {
+  const fixture = createProject();
+  for (const marker of [
+    "[Stop Hook Review] audit passed",
+    "   [stop hook review] audit passed",
+    "# [Stop Hook Review] audit passed",
+    "- [Stop Hook Review] audit passed",
+  ]) {
+    const output = runHook("Stop", fixture.project, {
+      last_assistant_message: marker,
+      stop_hook_active: false,
+    });
+    assertWarningOutput(output, marker);
+    assert.match(output.systemMessage, /did not request another model turn/);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("long prompt, Stop text, and structured tool fields are position invariant below the input cap", () => {
+  const fixture = createProject({ state: stateAtStage("experiment_results") });
+  const padding = "x".repeat(300 * 1024);
+  const contradiction = "Current stage: revision";
+  for (const message of [
+    `${contradiction}\n${padding}`,
+    `${padding.slice(0, padding.length / 2)}\n${contradiction}\n${padding.slice(padding.length / 2)}`,
+    `${padding}\n${contradiction}`,
+  ]) {
+    assertBlockOutput(runHook("Stop", fixture.project, {
+      last_assistant_message: message,
+      stop_hook_active: false,
+    }), "long Stop position");
+  }
+
+  const codePrompt = "Refactor the parser code and run unit tests.";
+  const researchPrompt = "Verify experiment results and audit the research claims.";
+  for (const prompt of [
+    `${researchPrompt}\n${padding}\n${codePrompt}`,
+    `${codePrompt}\n${padding.slice(0, padding.length / 2)}\n${researchPrompt}\n${padding.slice(padding.length / 2)}`,
+    `${codePrompt}\n${padding}\n${researchPrompt}`,
+  ]) {
+    const output = runHook("UserPromptSubmit", fixture.project, { prompt });
+    assert.equal(output.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+    assert.match(output.hookSpecificOutput.additionalContext, /Canonical semantic audit/);
+  }
+
+  const large = "x".repeat(70 * 1024);
+  for (const tool_input of [
+    { subject: "Revised manuscript submission", body: "Please submit the paper.", padding: large },
+    { padding: large, subject: "Revised manuscript submission", body: "Please submit the paper." },
+    { subject: "Revised manuscript submission", padding: large, body: "Please submit the paper." },
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "mcp__gmail__send_email",
+      tool_input,
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+  }
+  cleanup(fixture.temporary);
+});
+
+test("Hook input and state size limits have explicit MAX-1 MAX and MAX+1 behavior", () => {
+  const limit = 8 * 1024 * 1024;
+  const fixture = createProject();
+  const dangerous = officialInput("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "rm -rf results" },
+  });
+  for (const target of [limit - 1, limit]) {
+    const output = runRaw("PreToolUse", fixture.project, serializedObjectAtSize(dangerous, target));
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", `stdin size ${target}`);
+
+    const stopInput = officialInput("Stop", fixture.project, { stop_hook_active: false });
+    const stopRaw = serializedStringFieldAtSize(
+      stopInput,
+      "last_assistant_message",
+      "\nCurrent stage: revision",
+      target,
+    );
+    assertBlockOutput(runRaw("Stop", fixture.project, stopRaw), `Stop stdin size ${target}`);
+
+    const promptInput = officialInput("UserPromptSubmit", fixture.project);
+    const promptRaw = serializedStringFieldAtSize(
+      promptInput,
+      "prompt",
+      "\nVerify experiment results and audit the research claims.",
+      target,
+    );
+    const promptOutput = runRaw("UserPromptSubmit", fixture.project, promptRaw);
+    assert.equal(
+      promptOutput.hookSpecificOutput.hookEventName,
+      "UserPromptSubmit",
+      `prompt stdin size ${target}`,
+    );
+  }
+  assert.deepEqual(
+    runRaw("PreToolUse", fixture.project, serializedObjectAtSize(dangerous, limit + 1)),
+    {},
+    "an over-limit envelope is intentionally treated as malformed input",
+  );
+  const serializedDangerous = JSON.stringify(dangerous);
+  const trailingWhitespaceOverflow = `${serializedDangerous}${
+    " ".repeat(limit + 1 - Buffer.byteLength(serializedDangerous, "utf8"))
+  }`;
+  assert.deepEqual(
+    runRaw("PreToolUse", fixture.project, trailingWhitespaceOverflow),
+    {},
+    "a complete JSON prefix plus over-limit whitespace is still rejected",
+  );
+  const unicodeAtLimit = serializedObjectAtByteSize(dangerous, limit);
+  assert.equal(
+    runRaw("PreToolUse", fixture.project, unicodeAtLimit)
+      .hookSpecificOutput.permissionDecision,
+    "deny",
+    "the stdin limit is measured in UTF-8 bytes",
+  );
+  assert.deepEqual(
+    runRaw("PreToolUse", fixture.project, serializedObjectAtByteSize(dangerous, limit + 1)),
+    {},
+    "a non-ASCII envelope over the UTF-8 byte limit is rejected",
+  );
+  cleanup(fixture.temporary);
+
+  for (const target of [limit - 1, limit, limit + 1]) {
+    const stateFixture = createProject({
+      rawState: serializedObjectAtSize(makeState(), target),
+    });
+    const output = runHook("SessionStart", stateFixture.project);
+    if (target <= limit) {
+      assert.equal(output.hookSpecificOutput.hookEventName, "SessionStart", `state size ${target}`);
+    } else {
+      assert.deepEqual(output, {}, "an over-limit state is outside the active-project boundary");
+    }
+    cleanup(stateFixture.temporary);
+  }
+});
+
+test("malformed envelopes and unsupported events always emit exactly one no-op JSON object", () => {
+  const fixture = createProject();
+  for (const raw of [
+    "",
+    "   \n",
+    "null",
+    "[]",
+    "42",
+    "\"text\"",
+    "{not-json",
+    "{}{}",
+  ]) {
+    assert.deepEqual(runRaw("Stop", fixture.project, raw), {}, JSON.stringify(raw));
+  }
+  assert.deepEqual(runRaw("UnknownEvent", fixture.project, JSON.stringify({
+    cwd: fixture.project,
+    hook_event_name: "UnknownEvent",
+  })), {});
+  assert.deepEqual(runRaw("SessionStart", fixture.project, "\uFEFF{}"), {});
+
+  const bomInput = `\uFEFF${JSON.stringify(officialInput("SessionStart", fixture.project))}`;
+  const bomOutput = runRaw("SessionStart", fixture.project, bomInput);
+  assert.equal(bomOutput.hookSpecificOutput.hookEventName, "SessionStart");
+  cleanup(fixture.temporary);
+});
+
+test("all active Hook paths are read-only for both project and plugin data", () => {
+  const fixture = createProject({ state: stateAtStage("experiment_results") });
+  const pluginData = path.join(fixture.temporary, "plugin data");
+  fs.mkdirSync(pluginData, { recursive: true });
+  write(path.join(pluginData, "sentinel.txt"), "unchanged\n");
+  const projectBefore = snapshotFiles(fixture.project);
+  const pluginBefore = snapshotFiles(pluginData);
+  const env = { PLUGIN_DATA: pluginData };
+
+  runHook("SessionStart", fixture.project, {}, { env });
+  runHook("UserPromptSubmit", fixture.project, { prompt: "Audit the experiment results." }, { env });
+  runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "rm -rf results" },
+  }, { env });
+  runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "python3 scripts/researchctl.py status" },
+    tool_response: { exit_code: 0 },
+  }, { env });
+  runHook("Stop", fixture.project, {
+    last_assistant_message: "Current stage: revision",
+    stop_hook_active: false,
+  }, { env });
+
+  assert.deepEqual(snapshotFiles(fixture.project), projectBefore);
+  assert.deepEqual(snapshotFiles(pluginData), pluginBefore);
+  cleanup(fixture.temporary);
+});
+
+test("Stop deduplicates repeated contradictions and keeps feedback bounded", () => {
+  const fixture = createProject({ state: stateAtStage("experiment_results") });
+  const message = Array.from({ length: 12000 }, () => (
+    "Current stage: revision\nclaim_freeze: approved\nGate to exit: release"
+  )).join("\n");
+  const output = runHook("Stop", fixture.project, {
+    last_assistant_message: message,
+    stop_hook_active: false,
+  });
+  assertBlockOutput(output, "repeated contradictions");
+  assert.equal((output.reason.match(/current_stage=revision/g) || []).length, 1);
+  assert.equal((output.reason.match(/claim_freeze=approved/g) || []).length, 1);
+  assert.equal((output.reason.match(/gate_to_exit=release/g) || []).length, 1);
   cleanup(fixture.temporary);
 });
 
@@ -887,7 +1652,7 @@ test("a valid multi-hundred-KiB state keeps every Hook event active", () => {
   const stop = runHook("Stop", fixture.project, {
     last_assistant_message: "Table 2 reports top-1 accuracy of 91.2%.",
   });
-  assert.equal(stop.decision, "block");
+  assert.deepEqual(stop, {});
   cleanup(fixture.temporary);
 });
 
@@ -1153,7 +1918,7 @@ test("Prompt routing recognizes failing tests lint and typecheck as code-only", 
   cleanup(fixture.temporary);
 });
 
-test("Stop separates code metric repairs from material top-1 claims", () => {
+test("Stop does not rerun semantic review for code repairs or material metrics", () => {
   const fixture = createProject();
   const code = runHook("Stop", fixture.project, {
     last_assistant_message: "Fixed the metric parser bug that incorrectly reported accuracy improved by 12%; unit tests pass.",
@@ -1164,12 +1929,12 @@ test("Stop separates code metric repairs from material top-1 claims", () => {
     last_assistant_message: "Table 2 reports a top-1 score of 91.2%, and the conclusions were updated accordingly.",
     stop_hook_active: false,
   });
-  assert.equal(claim.decision, "block");
+  assert.deepEqual(claim, {});
   const mixed = runHook("Stop", fixture.project, {
     last_assistant_message: "Fixed the analysis script bug; mAP improved by 2.3%, supporting the central claim.",
     stop_hook_active: false,
   });
-  assert.equal(mixed.decision, "block");
+  assert.deepEqual(mixed, {});
   cleanup(fixture.temporary);
 });
 
@@ -1491,7 +2256,7 @@ test("prompt and Stop routing separates code detail from mixed and material scie
       last_assistant_message: message,
       stop_hook_active: false,
     });
-    assert.equal(output.decision, "block", message);
+    assert.deepEqual(output, {}, message);
   }
   assert.deepEqual(runHook("Stop", fixture.project, {
     last_assistant_message: "Fixed the parser that incorrectly reported accuracy improved by 12%; tests pass.",

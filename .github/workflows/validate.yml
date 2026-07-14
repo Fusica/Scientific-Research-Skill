@@ -34,9 +34,9 @@ jobs:
         run: >-
           node --test --experimental-test-coverage
           --test-coverage-include=hooks/research-workflow-hook.js
-          --test-coverage-lines=85
-          --test-coverage-branches=50
-          --test-coverage-functions=95
+          --test-coverage-lines=91
+          --test-coverage-branches=72
+          --test-coverage-functions=96
           tests/hooks.test.js
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts tests

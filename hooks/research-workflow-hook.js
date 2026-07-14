@@ -11,15 +11,18 @@ const SUPPORTED_EVENTS = new Set([
   "PostToolUse",
   "Stop",
 ]);
-const MAX_INPUT_CHARS = 8 * 1024 * 1024;
-const MAX_POLICY_CHARS = 256 * 1024;
-const MAX_STATE_CHARS = 8 * 1024 * 1024;
-const MAX_EVENT_TEXT_CHARS = 256 * 1024;
+const MAX_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_POLICY_BYTES = 256 * 1024;
+const MAX_STATE_BYTES = 8 * 1024 * 1024;
+// Event fields are already bounded by the complete stdin envelope. Keep their
+// contents position-invariant below that envelope cap instead of silently
+// ignoring a mechanically relevant statement placed near the end.
+const MAX_EVENT_TEXT_CHARS = MAX_INPUT_BYTES;
 const MAX_SESSION_CONTEXT_CHARS = 800;
-const MAX_PROMPT_CONTEXT_CHARS = 1200;
+const MAX_PROMPT_CONTEXT_CHARS = 2600;
 const MAX_POST_CONTEXT_CHARS = 4200;
 const MAX_STOP_REASON_CHARS = 1800;
-const MAX_TOOL_TEXT_CHARS = 64 * 1024;
+const MAX_TOOL_TEXT_CHARS = MAX_INPUT_BYTES;
 const REQUIRED_STATE_FIELDS = [
   "schema_version",
   "workflow_version",
@@ -37,12 +40,21 @@ const REQUIRED_STATE_FIELDS = [
 
 function readStdin() {
   return new Promise((resolve) => {
-    let input = "";
-    process.stdin.setEncoding("utf8");
+    const chunks = [];
+    let inputBytes = 0;
+    let overflow = false;
     process.stdin.on("data", (chunk) => {
-      if (input.length <= MAX_INPUT_CHARS) input += chunk;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      inputBytes += buffer.length;
+      if (inputBytes > MAX_INPUT_BYTES) {
+        overflow = true;
+        return;
+      }
+      chunks.push(buffer);
     });
-    process.stdin.on("end", () => resolve(input.slice(0, MAX_INPUT_CHARS)));
+    process.stdin.on("end", () => resolve(
+      overflow ? "" : Buffer.concat(chunks, inputBytes).toString("utf8"),
+    ));
     process.stdin.on("error", () => resolve(""));
   });
 }
@@ -75,25 +87,25 @@ function samePhysicalFile(left, right) {
   }
 }
 
-function safeReadText(candidate, maxChars) {
+function safeReadText(candidate, maxBytes) {
   try {
     const stats = fs.statSync(candidate);
-    if (!stats.isFile() || stats.size > maxChars) return null;
-    return fs.readFileSync(candidate, "utf8").slice(0, maxChars);
+    if (!stats.isFile() || stats.size > maxBytes) return null;
+    return fs.readFileSync(candidate, "utf8").slice(0, maxBytes);
   } catch (_error) {
     return null;
   }
 }
 
-function safeReadObject(candidate, maxChars = MAX_INPUT_CHARS) {
-  const text = safeReadText(candidate, maxChars);
+function safeReadObject(candidate, maxBytes = MAX_INPUT_BYTES) {
+  const text = safeReadText(candidate, maxBytes);
   return text === null ? null : parseObject(text);
 }
 
 function cleanText(value) {
   return String(value ?? "")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "?")
-    .replace(/\r\n?/g, "\n");
+    .replace(/\r\n?|[\u0085\u2028\u2029]/g, "\n");
 }
 
 function bounded(value, maxChars) {
@@ -190,7 +202,7 @@ function loadPolicy() {
     "references",
     "policy.yaml",
   );
-  const policy = safeReadObject(candidate, MAX_POLICY_CHARS);
+  const policy = safeReadObject(candidate, MAX_POLICY_BYTES);
   if (!policy) return null;
   if (!Array.isArray(policy.stage_order) || !policy.stage_order.length) return null;
   if (!Array.isArray(policy.gate_order) || !policy.gate_order.length) return null;
@@ -253,7 +265,7 @@ function activeProject(input) {
   const root = findResearchRoot(cwd);
   if (!root) return null;
   const statePath = path.join(root, ".research", "state.json");
-  const state = safeReadObject(statePath, MAX_STATE_CHARS);
+  const state = safeReadObject(statePath, MAX_STATE_BYTES);
   if (!state || state.enabled !== true) return null;
   const policy = loadPolicy();
   if (!policy) return null;
@@ -388,6 +400,9 @@ function promptContext(context) {
     ].join("\n"), MAX_PROMPT_CONTEXT_CHARS);
   }
   const gate = typeof spec.gate_to_exit === "string" ? spec.gate_to_exit : null;
+  const auditItems = Array.isArray(context.policy.semantic_audit)
+    ? context.policy.semantic_audit
+    : [];
   return bounded([
     "[RESEARCH WORKFLOW — PROMPT RELEVANT]",
     `Current stage: ${stage} — ${scalar(spec.label, "unlabeled")}`,
@@ -397,6 +412,10 @@ function promptContext(context) {
     "",
     `Artifact layout: ${scalar(context.policy.artifact_layout.instruction)}`,
     "Use the $research Skill, follow policy.yaml review_language, and load only the current-stage reference. policy.yaml is authoritative for evidence, Gate, and exit criteria.",
+    "",
+    "Before the first user-facing final answer, silently apply the canonical semantic audit below. Integrate any necessary correction into one complete, self-contained answer. Do not emit a standalone audit addendum, `[Stop Hook Review]`, or private chain-of-thought.",
+    "Canonical semantic audit:",
+    listLines(auditItems),
   ].join("\n"), MAX_PROMPT_CONTEXT_CHARS);
 }
 
@@ -1669,94 +1688,430 @@ function getStopHookActive(input) {
   return firstDefined(input, ["stop_hook_active", "stopHookActive"]) === true;
 }
 
-function hasMaterialResearchContent(input) {
-  const message = lastAssistantMessage(input).trim();
-  if (!message) return false;
+function regexAlternation(values) {
+  return values
+    .filter((value) => typeof value === "string" && value)
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+}
 
-  const metricToken = String.raw`(?:accuracy|precision|recall|loss|top[- ]?[15]|F1|f1|mAP|AUC|IoU|Dice|RMSE|MSE|MAE|R(?:2|²)|PSNR|SSIM|BLEU|ROUGE|准确率|精确率|召回率|平均精度|交并比|损失|均方根误差)`;
-  const disclaimedMetricBug = /\b(?:incorrectly|wrongly|erroneously|falsely)\s+(?:reported|showed|displayed)\b[^.\n]{0,100}\d+(?:\.\d+)?\s*%?/i.test(message)
-    || /(?:错误|不正确|误)(?:报告|显示|输出)[^。！？\n]{0,80}\d+(?:\.\d+)?\s*%?/.test(message);
-  const quantitativeMetric = !disclaimedMetricBug && new RegExp(
-    `(?:${metricToken})[^。！？\\n]{0,60}\\d+(?:\\.\\d+)?\\s*%?|\\d+(?:\\.\\d+)?\\s*%?[^。！？\\n]{0,60}(?:${metricToken})`,
+function assertionLine(rawLine) {
+  const normalized = cleanText(rawLine);
+  if (/^(?: {4,}|\t)/.test(normalized)) return "";
+  const line = normalized.trim();
+  if (!line || /^>/.test(line)) return "";
+  const unwrapped = line
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "")
+    .trim();
+  if (/^(`+)[\s\S]*\1$/.test(unwrapped)) return "";
+  const deEmphasized = unwrapped
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/(^|[^\w])__([^\n]+?)__(?=$|[^\w])/g, "$1$2")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/(^|[^\w])_([^\n]+?)_(?=$|[^\w])/g, "$1$2")
+    .trim();
+  if (/^(`+)[\s\S]*\1$/.test(deEmphasized)) return "";
+  return deEmphasized.replace(/`+/g, "").trim();
+}
+
+function assertionIsQualified(line, match) {
+  if (!match) return true;
+  const rawSuffix = line.slice(match.index + match[0].length).trim();
+  if (/^[?？]/.test(rawSuffix)) {
+    const answer = rawSuffix.replace(/^[?？]\s*/, "");
+    return !/^(?:yes|yep|correct|true|exactly|indeed|affirmative|是(?:的)?|对(?:的)?|正确|没错|确实)(?:\b|[。.!！]|$)/i.test(answer);
+  }
+  const suffix = rawSuffix
+    .replace(/^[\s`"'()[\]{}（）—–,:;.!。！？，；：-]+/, "")
+    .trim();
+  if (!suffix) return false;
+  return /^(?:if|unless|provided(?:\s+that)?|assuming|subject\s+to|only\s+(?:if|when|whenever|once|after|before|until)|would|could|should|will|may|might)\b/i.test(suffix)
+    || /^(?:(?:is|was)\s+)?(?:not\s+(?:(?:the\s+)?current|correct|true)|incorrect|wrong|invalid|false|hypothetical|outdated)\b/i.test(suffix)
+    || /^(?:isn['’]t|wasn['’]t)\s+(?:(?:the\s+)?current|correct|true|right)\b/i.test(suffix)
+    || /^(?:(?:is|was)\s+)?(?:(?:an?|the)\s+)?(?:(?:incorrect|wrong|invalid|hypothetical)\s+)?(?:example|illustration)\b/i.test(suffix)
+    || /^(?:for\s+(?:example|instance)|as\s+an?\s+example)\b/i.test(suffix)
+    || /^(?:does|do|did)\s+not\s+(?:mean|indicate|state)\b/i.test(suffix)
+    || /^(?:this|that|which)\s+(?:is|was)\s+(?:incorrect|wrong|invalid|false|not\s+(?:correct|true))\b/i.test(suffix)
+    || /^not\s+yet\b/i.test(suffix)
+    || /^(?:must|should)\s+not\b/i.test(suffix)
+    || /^(?:如果|若|假如|一旦|仅在|只有|前提是|才会|将会|可能|并不(?:正确|真实|表示|意味着)|并非(?:正确|真实|当前|如此)|不是(?:正确|真实|当前)|不(?:正确|对|代表|表示|意味着|是真的)|尚未|还未|不应|不能|例如|比如|是(?:一个|该|此)?(?:错|错误|不正确|不对|无效|假设)(?:的)?|是(?:一个|该|此)?(?:错误|不正确|无效|假设)?(?:示例|例子|反例))/.test(suffix);
+}
+
+function startsExampleScope(rawLine) {
+  const line = cleanText(rawLine)
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/[*_]/g, "")
+    .trim();
+  return /^(?:for\s+(?:example|instance)|e\.g\.[,:]?|hypothetical|expected\s+output|(?:(?:incorrect|wrong|invalid|hypothetical)\s+)?examples?(?:\s+(?:output|section|table|below))?(?:\s*\((?:incorrect|wrong|invalid|hypothetical)\))?)\s*[:：]?$/i.test(line)
+    || /^(?:例如|比如|举例|譬如|示例输出|错误输出|假设(?:如下)?|以下(?:为|是)?\s*(?:错误|不正确|不对|无效|假设)?\s*(?:示例|例子|反例)|(?:(?:错误|不正确|不对|无效|假设)\s*)?(?:示例|例子|反例))\s*[:：]?$/.test(line);
+}
+
+function startsActualScope(rawLine) {
+  const line = cleanText(rawLine)
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/[*_]/g, "")
+    .trim();
+  return /^(?:(?:actual|current|correct|corrected)\s+(?:status|state|answer|result)|conclusion)\s*[:：]?$/i.test(line)
+    || /^(?:(?:实际|当前|正确|更正后)(?:状态|阶段|答案|结果)|结论)\s*[:：]?$/.test(line);
+}
+
+function markdownTableCells(rawLine) {
+  const line = cleanText(rawLine).trim();
+  if (!line.includes("|")) return null;
+  const tableLine = line.replace(/^\|/, "").replace(/\|$/, "");
+  if (!tableLine.includes("|")) return null;
+  return tableLine.split("|").map((cell) => cell
+    .trim()
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/(^|[^\w])__([^\n]+?)__(?=$|[^\w])/g, "$1$2")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/(^|[^\w])_([^\n]+?)_(?=$|[^\w])/g, "$1$2")
+    .replace(/`+/g, "")
+    .trim());
+}
+
+function markdownTableDivider(cells) {
+  return Array.isArray(cells)
+    && cells.length > 0
+    && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function assertionContextKind(line) {
+  if (/^(?:(?:incorrect|wrong|invalid|hypothetical)\s+(?:example|literal)|the\s+following\s+is\s+(?:incorrect|wrong|invalid|hypothetical)|examples?|example|for\s+(?:example|instance)|e\.g\.|expected\s+output)\s*[:：;,；，]?/i.test(line)
+    || /^(?:以下(?:内容|说法)?(?:是|为)?(?:错误|不正确|无效|假设))/.test(line)) {
+    return "example";
+  }
+  if (/^(?:(?:do\s+not|don't|never)\s+(?:claim|state|write|say|report)|if|unless|provided(?:\s+that)?|assuming|subject\s+to)\b/i.test(line)
+    || /^(?:不要|不得|切勿)(?:声称|写成|写为|表述|报告)?|^(?:如果|若|假如|一旦|仅在|只有|前提是)/.test(line)) {
+    return "qualified";
+  }
+  return null;
+}
+
+function maskedAssertionText(text) {
+  const characters = text.split("");
+  const masked = [...characters];
+  const bracketStack = [];
+  const bracketPairs = new Map([["(", ")"], ["[", "]"], ["{", "}"], ["（", "）"]]);
+  const quotePairs = new Map([["\"", "\""], ["“", "”"], ["‘", "’"], ["「", "」"], ["『", "』"]]);
+  let quoteEnd = null;
+  let backtickLength = 0;
+  const escapedAt = (index) => {
+    let slashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && characters[cursor] === "\\"; cursor -= 1) {
+      slashes += 1;
+    }
+    return slashes % 2 === 1;
+  };
+
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
+    if (backtickLength) {
+      masked[index] = " ";
+      if (character === "`") {
+        let run = 1;
+        while (characters[index + run] === "`") run += 1;
+        for (let offset = 1; offset < run; offset += 1) masked[index + offset] = " ";
+        if (run >= backtickLength) backtickLength = 0;
+        index += run - 1;
+      }
+      continue;
+    }
+    if (quoteEnd) {
+      masked[index] = " ";
+      const wordApostrophe = quoteEnd === "'"
+        && /[\p{L}\p{N}]/u.test(characters[index - 1] || "")
+        && /[\p{L}\p{N}]/u.test(characters[index + 1] || "");
+      if (character === quoteEnd && !escapedAt(index) && !wordApostrophe) quoteEnd = null;
+      continue;
+    }
+    if (bracketStack.length) {
+      masked[index] = " ";
+      if (bracketPairs.has(character)) bracketStack.push(bracketPairs.get(character));
+      else if (character === bracketStack[bracketStack.length - 1]) bracketStack.pop();
+      continue;
+    }
+    if (character === "`") {
+      let run = 1;
+      while (characters[index + run] === "`") run += 1;
+      for (let offset = 0; offset < run; offset += 1) masked[index + offset] = " ";
+      backtickLength = run;
+      index += run - 1;
+      continue;
+    }
+    if (quotePairs.has(character)) {
+      masked[index] = " ";
+      quoteEnd = quotePairs.get(character);
+      continue;
+    }
+    if (character === "'"
+      && !/[\p{L}\p{N}]/u.test(characters[index - 1] || "")) {
+      masked[index] = " ";
+      quoteEnd = "'";
+      continue;
+    }
+    if (bracketPairs.has(character)) {
+      masked[index] = " ";
+      bracketStack.push(bracketPairs.get(character));
+    }
+  }
+  return masked.join("");
+}
+
+function splitAssertionSegments(line, boundaryPattern) {
+  const masked = maskedAssertionText(line);
+  const segments = [];
+  let start = 0;
+  boundaryPattern.lastIndex = 0;
+  for (let match = boundaryPattern.exec(masked); match; match = boundaryPattern.exec(masked)) {
+    segments.push(line.slice(start, match.index));
+    start = boundaryPattern.lastIndex;
+  }
+  segments.push(line.slice(start));
+  return segments;
+}
+
+function explicitStateContradictions(context, message) {
+  const stageIds = context.policy.stage_order;
+  const gateIds = context.policy.gate_order;
+  const statuses = context.policy.state_contract.gate_statuses;
+  const stagePattern = regexAlternation(stageIds);
+  const gatePattern = regexAlternation(gateIds);
+  const statusAliases = new Map([
+    ...statuses.map((status) => [status.toLowerCase(), status.toLowerCase()]),
+    ["待审批", "pending"],
+    ["已批准", "approved"],
+    ["已通过", "approved"],
+    ["已重开", "reopened"],
+  ]);
+  const statusPattern = regexAlternation([...statusAliases.keys()]);
+  const englishStatusPattern = regexAlternation(statuses);
+  const chineseStatusPattern = regexAlternation(["待审批", "已批准", "已通过", "已重开"]);
+  const stageDeclaration = new RegExp(
+    `^(?:(?:the\\s+)?(?:current|active)(?:[-_\\s]+(?:(?:research|workflow)[-_\\s]+)?stage)|当前(?:研究|科研|工作流)?阶段)\\s*(?:[:：=]|\\bis\\b|为|是|[—–-])\\s*(${stagePattern})(?:\\b|\\s|[—–-]|[。.!]|$)`,
     "i",
-  ).test(message);
-  const statisticalFinding = /\b(?:statistically\s+)?significant\b[^.\n]{0,100}(?:p\s*[<=>]|confidence\s+interval|\bCI\b)|\bp\s*[<=>]\s*0?\.\d+|\b95\s*%\s*(?:confidence\s+interval|CI)\b/i.test(message)
-    || /(?:显著|统计显著)[^。！？\n]{0,80}(?:p\s*[<=>]|置信区间)/.test(message);
-  const excludedOrNullFinding = /\b(?:failed|invalid|outlier)\s+runs?\b[^.\n]{0,50}\bexcluded\b|\bno\s+(?:statistically\s+)?significant\s+difference\b|\b(?:null|negative)\s+(?:result|finding)s?\b/i.test(message)
-    || /(?:失败|无效|异常)(?:运行|实验)[^。！？\n]{0,40}(?:已)?排除|(?:未发现|没有)显著差异|(?:空|阴性|负面)结果/.test(message);
-  const codeRepair = /\b(?:fixed|debugged|refactored|updated|repaired)\b[\s\S]{0,100}\b(?:parser|loader|reader|function|class|module|script|code|bug|unit\s+tests?)\b/i.test(message)
-    && /\b(?:tests?\s+(?:pass|passed)|lint\s+(?:passes|passed)|bug|code|parser|loader)\b/i.test(message)
-    && !/\b(?:manuscript|paper|rebuttal|reviewer|experiment\s+result|evaluation\s+result|research\s+claim)\b/i.test(message);
-  const materialClaimAlongsideCode = /\b(?:central|scientific|research)\s+claim\b/i.test(message)
-    || /\b(?:supports?|proves?|demonstrates?|establishes?)\b[\s\S]{0,50}\bclaim\b/i.test(message)
-    || /\b(?:outperforms?|beats?|exceeds?)\b[\s\S]{0,60}\b(?:baseline|prior\s+work|sota)\b/i.test(message)
-    || quantitativeMetric || statisticalFinding || excludedOrNullFinding;
-  if (codeRepair && !materialClaimAlongsideCode) return false;
-  if (quantitativeMetric || statisticalFinding || excludedOrNullFinding) return true;
+  );
+  const explicitGateDeclaration = new RegExp(
+    `^(${gatePattern})(?:\\s+gate)?(?:\\s+status)?\\s*(?:[:：=]|\\bis\\b|为|是)\\s*[（(]?(${statusPattern})[）)]?(?=$|\\s|[。.!?？,，;；—–-])`,
+    "i",
+  );
+  const labeledEnglishGateDeclaration = new RegExp(
+    `^(${gatePattern})\\s+(?:gate(?:\\s+status)?|status)\\s+\\(?(${englishStatusPattern})\\)?(?=$|\\s|[.!?，,;；—–-])`,
+    "i",
+  );
+  const bareEnglishGateDeclaration = new RegExp(
+    `^(${gatePattern})\\s+(${englishStatusPattern})(?=$|[.!?，,;；—–-]|\\s+(?!(?:artifacts?|files?|outputs?|work|items?|content|manuscripts?|submissions?)\\b))`,
+    "i",
+  );
+  const bareChineseGateDeclaration = new RegExp(
+    `^(${gatePattern})(?:\\s+gate)?\\s+\\(?(${chineseStatusPattern})\\)?(?=$|[。！？，,;；—–-])`,
+    "i",
+  );
+  const parenthesizedGateDeclaration = new RegExp(
+    `^(${gatePattern})\\s*[（(](${statusPattern})[）)](?=$|\\s|[。.!?？,，;；—–-])`,
+    "i",
+  );
+  const gateToExitDeclaration = new RegExp(
+    `^(?:(?:the\\s+)?(?:gate\\s+to\\s+exit|next\\s+gate)|(?:下一道|退出)\\s*gate)\\s*(?:[:：=]|\\bis\\b|为|是|[—–-])\\s*(${gatePattern}|none|无)(?=$|\\s|[（(,，。.!—–-])\\s*(?:[（(](${statusPattern})[）)]|[,，]\\s*(?:currently|目前)?\\s*(?:is|为|是)?\\s*(${statusPattern})|[—–-]\\s*(${statusPattern}))?`,
+    "i",
+  );
+  const declarationStart = `(?:[*_]{1,2})?(?:current|active|the\\s+(?:current|active|next)|当前|下一道|退出|${gatePattern})(?:\\b|[-_\\s:：=（(—–])`;
+  const declarationBoundary = new RegExp(
+    `(?:[;；]+|[。.,，—–]\\s*)\\s*(?=${declarationStart})`,
+    "gi",
+  );
+  const independentSentenceBoundary = new RegExp(
+    `[.!?。！？]\\s*(?=${declarationStart})`,
+    "i",
+  );
+  const issues = new Set();
+  const actualStage = scalar(context.state.current_stage, "missing");
+  const spec = stageSpec(context);
+  const expectedExitGate = spec && typeof spec.gate_to_exit === "string"
+    ? spec.gate_to_exit
+    : "none";
+  let fenceMarker = null;
+  let exampleScope = false;
+  let exampleListMode = null;
+  let tableSpec = null;
 
-  const gateOrWorkflowState = /\b(?:idea[_ -]?freeze|method[_ -]?experiment[_ -]?approval|claim[_ -]?freeze|release\s+gate|researchctl\s+(?:gate|artifact|checkpoint|enable|disable|init)|gate\s+(?:is\s+)?(?:pending|approved|reopened|frozen))\b/i.test(message)
-    || /(?:门禁|闸门|冻结|批准|研究阶段)[^。！？\n]{0,50}(?:待定|通过|批准|重开|完成|进入|切换)/.test(message);
-  if (gateOrWorkflowState) return true;
+  const compareStage = (asserted) => {
+    if (asserted !== actualStage) {
+      issues.add(`The answer states current_stage=${asserted}; .research/state.json says ${actualStage}.`);
+    }
+  };
+  const compareGate = (gate, asserted) => {
+    const actual = scalar(gateStatus(context, gate), "missing");
+    if (asserted !== actual) {
+      issues.add(`The answer states ${gate}=${asserted}; .research/state.json says ${actual}.`);
+    }
+  };
+  const compareExitGate = (gate) => {
+    if (gate !== expectedExitGate) {
+      issues.add(`The answer states gate_to_exit=${gate}; policy and current_stage require ${expectedExitGate}.`);
+    }
+  };
+  const normalizeStatus = (status) => statusAliases.get(status.toLowerCase()) || "";
+  const normalizeGate = (gate) => gate.toLowerCase() === "无" ? "none" : gate.toLowerCase();
 
-  const researchResultSubject = /\b(?:experiment|evaluation|benchmark|training)\s+(?:result|output|finding)s?\b/i.test(message)
-    || /(?:实验结果|实验输出|实验发现|评估结果|基准结果|训练结果)/.test(message);
-  const researchResultAssertion = /\b(?:completed?|finished|verified|validated|checked|measured|achieved|improved?|increased?|decreased?|reduced?|outperformed?|failed|excluded|supports?|shows?)\b/i.test(message)
-    || /(?:已完成|完成了|已验证|验证通过|已检查|测得|达到|提升|提高|增加|下降|降低|优于|失败|排除|支持|表明|显示)/.test(message);
-  if (researchResultSubject && researchResultAssertion) return true;
+  for (const rawLine of message.split("\n")) {
+    const normalizedRawLine = cleanText(rawLine);
+    if (/^(?: {4,}|\t)/.test(normalizedRawLine)) continue;
+    const fenceMatch = normalizedRawLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!fenceMarker) {
+        fenceMarker = { character: marker[0], length: marker.length };
+      } else if (fenceMarker.character === marker[0]
+        && marker.length >= fenceMarker.length
+        && !fenceMatch[2].trim()) {
+        fenceMarker = null;
+      }
+      continue;
+    }
+    if (fenceMarker) continue;
+    const rawTrimmed = normalizedRawLine.trim();
+    if (startsExampleScope(rawLine)) {
+      exampleScope = true;
+      exampleListMode = null;
+      continue;
+    }
+    if (exampleScope) {
+      if (!rawTrimmed) continue;
+      if (startsActualScope(rawLine)) {
+        exampleScope = false;
+        exampleListMode = null;
+        continue;
+      }
+      const isHeading = /^\s*#{1,6}\s+/.test(cleanText(rawLine));
+      const isListItem = /^(?:[-*+]\s+|\d+[.)]\s+)/.test(rawTrimmed);
+      if (isHeading) {
+        exampleScope = false;
+        exampleListMode = null;
+      } else if (exampleListMode === null) {
+        exampleListMode = isListItem;
+        continue;
+      } else if (exampleListMode === true && !isListItem) {
+        exampleScope = false;
+        exampleListMode = null;
+      } else {
+        continue;
+      }
+    }
 
-  const metricSubject = /\b(?:accuracy|precision|recall|loss|metric|sample\s+size|top[- ]?[15]|bleu|rouge|RMSE|MSE|MAE|R2|PSNR|SSIM)\b/i.test(message)
-    || PERFORMANCE_METRIC_PATTERN.test(message)
-    || /(?:准确率|精确率|召回率|平均精度|交并比|损失|指标|样本量)/.test(message);
-  const metricAssertion = /\b(?:measured|achieved|improved?|increased?|decreased?|reduced?|outperformed?|failed|excluded)\b/i.test(message)
-    || /(?:测得|达到|提升|提高|增加|下降|降低|优于|失败|排除)/.test(message)
-    || /(?:\b(?:accuracy|precision|recall|loss|metric|sample\s+size|top[- ]?[15]|bleu|rouge)\b|\b(?:F1|f1|mAP|AUC|IoU|Dice)\b|(?:准确率|精确率|召回率|平均精度|交并比|损失|指标|样本量))[^。！？\n]{0,50}\d+(?:\.\d+)?\s*%?/.test(message);
-  if (metricSubject && metricAssertion) return true;
+    const line = assertionLine(rawLine);
+    if (!line) continue;
+    const tableCells = markdownTableCells(rawLine);
+    if (tableCells) {
+      if (markdownTableDivider(tableCells)) continue;
+      const normalizedCells = tableCells.map((cell) => cell.toLowerCase().replace(/\s+/g, " "));
+      const gateIndex = normalizedCells.findIndex((cell) => /^(?:gate(?: id)?|门禁)$/.test(cell));
+      const statusIndex = normalizedCells.findIndex((cell) => /^(?:status|(?:current|actual)(?: gate)? status|(?:当前|实际)(?:gate)?状态)$/.test(cell));
+      const fieldIndex = normalizedCells.findIndex((cell) => /^(?:field|item|字段|项目)$/.test(cell));
+      const valueIndex = normalizedCells.findIndex((cell) => /^(?:(?:current|actual) (?:value|status|state)|(?:当前|实际)(?:值|状态))$/.test(cell));
+      if (gateIndex >= 0 && statusIndex >= 0) {
+        tableSpec = { kind: "gate", keyIndex: gateIndex, valueIndex: statusIndex };
+        continue;
+      }
+      if (fieldIndex >= 0 && valueIndex >= 0) {
+        tableSpec = { kind: "field", keyIndex: fieldIndex, valueIndex };
+        continue;
+      }
+      if (gateIndex >= 0 || fieldIndex >= 0) {
+        tableSpec = null;
+        continue;
+      }
+      if (tableSpec
+        && tableSpec.keyIndex < tableCells.length
+        && tableSpec.valueIndex < tableCells.length) {
+        const key = tableCells[tableSpec.keyIndex].trim();
+        const value = tableCells[tableSpec.valueIndex].trim();
+        if (tableSpec.kind === "gate") {
+          const gate = normalizeGate(key);
+          const statusMatch = value.match(new RegExp(`^[（(]?(${statusPattern})[）)]?$`, "i"));
+          if (gateIds.includes(gate) && statusMatch) compareGate(gate, normalizeStatus(statusMatch[1]));
+        } else if (/^(?:current[-_\s]+stage|当前(?:研究|科研|工作流)?阶段)$/i.test(key)) {
+          const asserted = value.toLowerCase();
+          if (stageIds.includes(asserted)) compareStage(asserted);
+        } else {
+          const gate = normalizeGate(key);
+          const statusMatch = value.match(new RegExp(`^[（(]?(${statusPattern})[）)]?$`, "i"));
+          if (gateIds.includes(gate) && statusMatch) compareGate(gate, normalizeStatus(statusMatch[1]));
+        }
+      }
+      continue;
+    }
+    tableSpec = null;
 
-  const experimentCompletion = /\b(?:experiment|evaluation|benchmark|training)\b(?!\s+(?:script|code|runner|pipeline|test))[\s\S]{0,60}\b(?:completed?|finished|executed|launched)\b/i.test(message)
-    || /\b(?:completed?|finished|executed|launched)\b[\s\S]{0,40}\b(?:experiment|evaluation|benchmark|training)\b(?!\s+(?:script|code|runner|pipeline|test))/i.test(message)
-    || /(?:实验|评估|基准测试|训练)(?!脚本|代码|程序|测试)[^。！？\n]{0,40}(?:已完成|完成了|已执行|已启动)/.test(message)
-    || /(?:已完成|完成了|已执行|已启动)[^。！？\n]{0,30}(?:实验|评估|基准测试|训练)(?!脚本|代码|程序|测试)/.test(message);
-  if (experimentCompletion) return true;
+    const contextKind = assertionContextKind(line);
+    if (contextKind === "example"
+      || (contextKind && !independentSentenceBoundary.test(maskedAssertionText(rawLine)))) continue;
+    for (const rawSegment of splitAssertionSegments(rawLine, declarationBoundary)) {
+      const segment = assertionLine(rawSegment);
+      if (!segment) continue;
+      const stageMatch = segment.match(stageDeclaration);
+      if (stageMatch && !assertionIsQualified(segment, stageMatch)) {
+        compareStage(stageMatch[1].toLowerCase());
+      }
 
-  const claimSubject = /\b(?:claim|novel|novelty|citation|evidence|hypothesis|prior\s+work|literature\s+(?:search|review))\b/i.test(message)
-    || /(?:主张|论点|创新性|新颖性|引用|证据|假设|相关工作|文献(?:检索|综述))/.test(message);
-  const claimAssertion = /\b(?:proves?|supports?|shows?|demonstrates?|establishes?|verified|validated|checked|complete|completed|falsified|confirmed|novel)\b/i.test(message)
-    || /(?:证明|支持|表明|显示|建立|已验证|已核查|已检查|完成|证伪|确认|创新|新颖)/.test(message);
-  if (claimSubject && claimAssertion) return true;
+      const exitMatch = segment.match(gateToExitDeclaration);
+      if (exitMatch && !assertionIsQualified(segment, exitMatch)) {
+        const gate = normalizeGate(exitMatch[1]);
+        const assertedStatus = normalizeStatus(exitMatch[2] || exitMatch[3] || exitMatch[4] || "");
+        compareExitGate(gate);
+        if (assertedStatus && gateIds.includes(gate)) compareGate(gate, assertedStatus);
+        continue;
+      }
 
-  const comparativeClaim = /\b(?:method|model|approach|system|algorithm)\b[\s\S]{0,80}\b(?:outperforms?|beats?|exceeds?|is\s+(?:better|superior))\b[\s\S]{0,80}\b(?:baseline|prior\s+work|state[- ]of[- ]the[- ]art|sota)\b/i.test(message)
-    || /\b(?:benchmark|evaluation|experiment)\b[\s\S]{0,80}\b(?:shows?|demonstrates?|indicates?)\b[\s\S]{0,100}\b(?:outperforms?|better|superior|stronger)\b/i.test(message)
-    || /(?:方法|模型|方案|系统|算法)[^。！？\n]{0,60}(?:优于|超过|胜过)[^。！？\n]{0,40}(?:基线|现有方法|已有工作|最先进方法)/.test(message)
-    || /(?:基准|评估|实验)[^。！？\n]{0,60}(?:表明|显示|证明)[^。！？\n]{0,80}(?:更好|更强|更优|优越)/.test(message);
-  if (comparativeClaim) return true;
-
-  const deliveryText = message
-    .replace(/\b(?:(?:manuscript|paper|researchctl|experiment|training|literature|citation)\s+(?:parser|generator|script|runner|pipeline|code|cli|tool|module|function|class|implementation)|(?:parser|generator|script|runner|pipeline|code|cli|tool|module|function|class)\s+(?:for|of)\s+(?:the\s+)?(?:manuscript|paper|researchctl|experiment|training|literature|citation))\b/gi, "")
-    .replace(/(?:论文|稿件|实验|训练|文献|引用)(?:生成|解析|处理|读取|加载)(?:脚本|代码|工具|模块|函数|类|实现)?/g, "");
-  const deliverySubject = /\b(?:idea\s+card|evidence\s+matrix|method\s+contract|experiment\s+registry|run\s+registry|claim\s+ledger|manuscript|paper|rebuttal|reviewer\s+response|release\s+checklist|submission)\b/i.test(deliveryText)
-    || /(?:想法卡|证据矩阵|方法合同|实验登记|运行登记|主张台账|论文|稿件|返修|审稿回复|回复信|发布清单|投稿)/.test(deliveryText);
-  const deliveryAssertion = /\b(?:created|prepared|updated|edited|changed|revised|rewritten|completed|verified|ready|compiled|rendered|submitted|sent)\b/i.test(deliveryText)
-    || /(?:(?:已|已经)(?:创建|准备|更新|编辑|修订|重写|改写|修改|完成|验证|编译|渲染|提交|发送)|就绪)/.test(deliveryText);
-  return deliverySubject && deliveryAssertion;
+      const gateMatch = segment.match(explicitGateDeclaration)
+        || segment.match(labeledEnglishGateDeclaration)
+        || segment.match(bareEnglishGateDeclaration)
+        || segment.match(bareChineseGateDeclaration)
+        || segment.match(parenthesizedGateDeclaration);
+      if (gateMatch && !assertionIsQualified(segment, gateMatch)) {
+        compareGate(gateMatch[1].toLowerCase(), normalizeStatus(gateMatch[2]));
+      }
+    }
+  }
+  return [...issues];
 }
 
 function stopAudit(context, input) {
-  if (getStopHookActive(input) || !hasMaterialResearchContent(input)) return {};
-  const spec = stageSpec(context);
-  const gate = spec && typeof spec.gate_to_exit === "string" ? spec.gate_to_exit : null;
-  const auditItems = Array.isArray(context.policy.semantic_audit)
-    ? context.policy.semantic_audit
-    : [];
-  const reason = bounded([
-    "Run the single stop-time semantic audit with the current session model. The preceding assistant answer must remain unchanged: do not reproduce, rewrite, replace, or silently correct it.",
-    "Return only a concise, evidence-bounded audit addendum in the same language as the preceding answer, beginning with `[Stop Hook Review]`. State that the review passed when no material issue is found; otherwise state the issue and the bounded correction the user should apply. Do not reveal private chain-of-thought.",
-    `Active stage: ${scalar(context.state.current_stage, "invalid")}`,
-    `Gate to exit: ${gate ? `${gate} (${scalar(gateStatus(context, gate), "missing")})` : "none"}`,
-    "Check the applicable policy invariants:",
-    listLines(auditItems),
-    "Finish after the audit addendum. This Hook requests exactly one continuation; stop_hook_active prevents another audit loop.",
-  ].join("\n"), MAX_STOP_REASON_CHARS);
-  return { decision: "block", reason };
+  if (getStopHookActive(input)) return {};
+  const message = lastAssistantMessage(input);
+  if (!message.trim()) return {};
+  const stateCheck = validateState(context);
+  if (stateCheck.errors.length) {
+    return {
+      continue: true,
+      systemMessage: bounded([
+        "[RESEARCH STOP OBSERVER] The active .research state failed mechanical validation, so this non-blocking observer did not compare workflow claims.",
+        listLines(stateCheck.errors.slice(0, 4)),
+        "Run researchctl doctor before relying on stage or Gate statements. No additional model turn was requested.",
+      ].join("\n"), MAX_STOP_REASON_CHARS),
+    };
+  }
+  const contradictions = explicitStateContradictions(context, message);
+  if (contradictions.length) {
+    const reason = bounded([
+      "The Stop observer found an explicit mechanical contradiction with .research/state.json or the canonical policy:",
+      listLines(contradictions),
+      "Treat the preceding response as a draft and return one complete, self-contained corrected answer. Preserve supported content, correct only the listed contradiction, and do not return a standalone audit addendum or private chain-of-thought.",
+      "This Hook requests one necessary continuation; stop_hook_active prevents another Stop loop.",
+    ].join("\n"), MAX_STOP_REASON_CHARS);
+    return { decision: "block", reason };
+  }
+  const firstAssertion = message.split("\n").map(assertionLine).find(Boolean) || "";
+  if (/^\[Stop Hook Review\]/i.test(firstAssertion)) {
+    return {
+      continue: true,
+      systemMessage: "[RESEARCH STOP OBSERVER] The response begins with the legacy standalone [Stop Hook Review] marker. This non-blocking observer did not request another model turn; if the main answer is missing, regenerate it in full.",
+    };
+  }
+  return {};
 }
 
 function handleEvent(event, context, input) {
