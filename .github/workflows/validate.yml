@@ -15,13 +15,38 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
       - name: Install validation dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate repository
         run: python3 scripts/validate_repo.py
       - name: Run tests
         run: python3 -m unittest discover -s tests -v
+      - name: Enforce aggregate Python coverage floor
+        run: |
+          python3 -m coverage erase
+          python3 -m coverage run -m unittest discover -s tests
+          python3 -m coverage combine
+          python3 -m coverage report
       - name: Run hook compatibility tests
-        run: node --test tests/hooks.test.js
+        run: >-
+          node --test --experimental-test-coverage
+          --test-coverage-include=hooks/research-workflow-hook.js
+          --test-coverage-lines=85
+          --test-coverage-branches=50
+          --test-coverage-functions=95
+          tests/hooks.test.js
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts tests
+
+  windows-researchctl:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Exercise Windows state locking and CLI behavior
+        run: python -m unittest discover -s tests -p "test_researchctl.py" -v

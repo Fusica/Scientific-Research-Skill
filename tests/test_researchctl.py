@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import errno
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from scripts import researchctl as researchctl_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +40,36 @@ def policy_document() -> dict[str, object]:
             "release",
         ],
         "state_contract": {
+            "required_fields": [
+                "schema_version",
+                "workflow_version",
+                "enabled",
+                "project_id",
+                "project_name",
+                "current_stage",
+                "gates",
+                "artifacts",
+                "last_checkpoint",
+                "stage_history",
+                "created_at",
+                "updated_at",
+            ],
+            "stage_ids": [
+                "idea",
+                "literature",
+                "method",
+                "experiment_results",
+                "paper",
+                "revision",
+            ],
+            "gate_ids": [
+                "idea_freeze",
+                "method_experiment_approval",
+                "claim_freeze",
+                "release",
+            ],
+            "gate_statuses": ["pending", "approved", "reopened"],
+            "gate_actions": ["approve", "reopen"],
             "artifact_pointer_fields": [
                 "path",
                 "artifact_id",
@@ -47,6 +85,16 @@ def policy_document() -> dict[str, object]:
                 "Write new workflow artifacts under .research/artifacts/<stage-id>/; "
                 "never create project-root research/, contracts/, or artifacts/. "
                 "Register existing user files in place."
+            ),
+        },
+        "review_language": {
+            "internal_review_default": "zh-CN",
+            "formal_output_default": "en",
+            "instruction": (
+                ".research 中需要人工审核或维护的中间产物、memory、checkpoint summary "
+                "和 Gate reason 采用中文骨干；论文、返修回复、代码及注释保持英文；"
+                "JSON/YAML 字段、ID、枚举、路径、命令、公式、原始引文、书目信息与原始日志"
+                "保持英文或原文。"
             ),
         },
         "gates": {
@@ -164,21 +212,30 @@ class ResearchCtlTest(unittest.TestCase):
     def run_ctl(
         self, *arguments: str, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
-        environment = os.environ.copy()
-        environment["RESEARCHCTL_POLICY"] = str(self.policy)
-        environment["RESEARCHCTL_ACTOR"] = "unit-test-researcher"
         return subprocess.run(
             [sys.executable, str(RESEARCHCTL), *arguments],
             cwd=cwd or self.project,
-            env=environment,
+            env=self.ctl_environment(),
             check=False,
             capture_output=True,
             text=True,
         )
 
+    def ctl_environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        environment["RESEARCHCTL_POLICY"] = str(self.policy)
+        environment["RESEARCHCTL_ACTOR"] = "unit-test-researcher"
+        return environment
+
     def load_state(self) -> dict[str, object]:
         return json.loads(
             (self.project / ".research/state.json").read_text(encoding="utf-8")
+        )
+
+    def write_state(self, state: dict[str, object]) -> None:
+        (self.project / ".research/state.json").write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
 
     def initialize(self) -> dict[str, object]:
@@ -245,6 +302,14 @@ class ResearchCtlTest(unittest.TestCase):
         memory = self.project / ".research/memory.md"
         artifact_root = self.project / ".research/artifacts"
         self.assertTrue(artifact_root.is_dir())
+        generated_memory = memory.read_text(encoding="utf-8")
+        self.assertIn(f"# 研究记忆：{self.project.name}", generated_memory)
+        self.assertIn("## 已验证事实", generated_memory)
+        self.assertIn("## 失败尝试与经验", generated_memory)
+        self.assertNotIn("## Verified Facts", generated_memory)
+        state_text = (self.project / ".research/state.json").read_text(encoding="utf-8")
+        self.assertIn('"schema_version"', state_text)
+        self.assertIn('"current_stage": "idea"', state_text)
         memory.write_text("personal project memory\n", encoding="utf-8")
         artifact_root.rmdir()
 
@@ -327,6 +392,30 @@ class ResearchCtlTest(unittest.TestCase):
         enabled = self.run_ctl("enable")
         self.assertEqual(enabled.returncode, 2)
         self.assertIn("workflow_version does not match", enabled.stderr)
+
+    def test_enable_rejects_a_structurally_invalid_disabled_state(self) -> None:
+        self.initialize()
+        self.assertEqual(self.run_ctl("disable").returncode, 0)
+        state = self.load_state()
+        state["current_stage"] = "forged"
+        self.write_state(state)
+
+        result = self.run_ctl("enable")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot be enabled", result.stderr)
+        self.assertIs(self.load_state()["enabled"], False)
+
+    def test_disable_remains_available_when_timestamp_cannot_advance(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        state["updated_at"] = "9999-12-31T23:59:59.999999Z"
+        self.write_state(state)
+
+        result = self.run_ctl("disable")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        disabled = self.load_state()
+        self.assertIs(disabled["enabled"], False)
+        self.assertEqual(disabled["updated_at"], "9999-12-31T23:59:59.999999Z")
 
     def test_artifact_register_hashes_files_and_is_idempotent(self) -> None:
         self.initialize()
@@ -551,7 +640,7 @@ class ResearchCtlTest(unittest.TestCase):
         self.register_gate_artifacts("idea_freeze")
 
         approved = self.run_ctl(
-            "gate", "approve", "idea_freeze", "--reason", "Evidence package reviewed"
+            "gate", "approve", "idea_freeze", "--reason", "证据包已完成审核"
         )
         self.assertEqual(approved.returncode, 0, approved.stderr)
         state = self.load_state()
@@ -560,7 +649,7 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(len(record["history"]), 1)
         decision = record["history"][0]
         self.assertEqual(decision["action"], "approve")
-        self.assertEqual(decision["reason"], "Evidence package reviewed")
+        self.assertEqual(decision["reason"], "证据包已完成审核")
         self.assertEqual(decision["actor"], "unit-test-researcher")
         self.assertEqual(
             {reference["label"] for reference in decision["artifact_refs"]},
@@ -743,14 +832,17 @@ class ResearchCtlTest(unittest.TestCase):
         self.initialize()
 
         result = self.run_ctl(
-            "checkpoint", "--summary", "Literature search protocol registered"
+            "checkpoint", "--summary", "文献检索协议已登记"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         checkpoint = self.load_state()["last_checkpoint"]
         self.assertEqual(
-            checkpoint["summary"], "Literature search protocol registered"
+            checkpoint["summary"], "文献检索协议已登记"
         )
         self.assertTrue(checkpoint["timestamp"].endswith("Z"))
+        state_text = (self.project / ".research/state.json").read_text(encoding="utf-8")
+        self.assertIn("文献检索协议已登记", state_text)
+        self.assertNotIn("\\u6587\\u732e", state_text)
 
         empty = self.run_ctl("checkpoint", "--summary", "")
         self.assertEqual(empty.returncode, 2)
@@ -782,6 +874,19 @@ class ResearchCtlTest(unittest.TestCase):
         )
         self.assertEqual(gate_blocked.returncode, 2)
         self.assertIn("requires approved Gate idea_freeze", gate_blocked.stderr)
+
+    def test_checkpoint_cannot_advance_from_a_forged_gate_status(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        state["gates"]["idea_freeze"]["status"] = "approved"
+        self.write_state(state)
+
+        result = self.run_ctl(
+            "checkpoint", "--summary", "伪造门禁推进", "--stage", "method"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("without history must be pending", result.stderr)
+        self.assertEqual(self.load_state()["current_stage"], "idea")
 
     def test_release_target_is_derived_from_the_approved_stage(self) -> None:
         self.initialize()
@@ -954,6 +1059,827 @@ class ResearchCtlTest(unittest.TestCase):
             "current_stage does not match the final recorded stage transition",
             result.stdout,
         )
+
+    def test_concurrent_artifact_registrations_preserve_every_successful_update(
+        self,
+    ) -> None:
+        self.initialize()
+        processes: list[subprocess.Popen[str]] = []
+        expected_roles: set[str] = set()
+        for index in range(12):
+            role = f"stress_role_{index}"
+            expected_roles.add(role)
+            artifact = (
+                self.project
+                / ".research"
+                / "artifacts"
+                / "idea"
+                / f"stress-{index}.md"
+            )
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(f"# Concurrent artifact {index}\n", encoding="utf-8")
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(RESEARCHCTL),
+                        "artifact",
+                        "register",
+                        role,
+                        "--stage",
+                        "idea",
+                        "--path",
+                        str(artifact),
+                        "--artifact-id",
+                        f"STRESS-{index}",
+                        "--version",
+                        "1",
+                    ],
+                    cwd=self.project,
+                    env=self.ctl_environment(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+        outcomes = [process.communicate(timeout=20) for process in processes]
+        for process, (stdout, stderr) in zip(processes, outcomes):
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+        self.assertEqual(
+            set(self.load_state()["artifacts"]["idea"]), expected_roles
+        )
+        self.assertEqual(
+            list((self.project / ".research").glob(".state.json.*.tmp")), []
+        )
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_concurrent_init_observes_one_project_identity(self) -> None:
+        processes = [
+            subprocess.Popen(
+                [sys.executable, str(RESEARCHCTL), "init"],
+                cwd=self.project,
+                env=self.ctl_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(8)
+        ]
+        observed_ids: set[str] = set()
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            match = re.search(r"PROJECT-[A-Z0-9]+", stdout)
+            self.assertIsNotNone(match, stdout)
+            assert match is not None
+            observed_ids.add(match.group(0))
+        self.assertEqual(observed_ids, {self.load_state()["project_id"]})
+        self.assertTrue((self.project / ".research/state.lock").is_file())
+
+    def test_failed_init_never_activates_a_partial_project(self) -> None:
+        research = self.project / ".research"
+        research.mkdir()
+        artifact_root = research / "artifacts"
+        artifact_root.write_text("blocks directory creation\n", encoding="utf-8")
+
+        failed = self.run_ctl("init")
+
+        self.assertEqual(failed.returncode, 2)
+        self.assertFalse((research / "state.json").exists())
+        self.assertTrue((research / "memory.md").is_file())
+        artifact_root.unlink()
+        recovered = self.run_ctl("init")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue((research / "state.json").is_file())
+        self.assertEqual(self.run_ctl("doctor").returncode, 0)
+
+    def test_checkpoint_same_stage_is_idempotent(self) -> None:
+        self.initialize()
+        result = self.run_ctl(
+            "checkpoint",
+            "--summary",
+            "保持当前想法阶段，仅更新恢复点",
+            "--stage",
+            "idea",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.load_state()
+        self.assertEqual(state["current_stage"], "idea")
+        self.assertEqual(state["stage_history"], [])
+        self.assertEqual(
+            state["last_checkpoint"]["summary"], "保持当前想法阶段，仅更新恢复点"
+        )
+
+    def test_reopening_gate_never_advances_from_an_earlier_stage(self) -> None:
+        self.initialize()
+        for gate in (
+            "idea_freeze",
+            "method_experiment_approval",
+            "claim_freeze",
+        ):
+            self.register_gate_artifacts(gate)
+            approved = self.run_ctl(
+                "gate", "approve", gate, "--reason", f"批准 {gate}"
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+        back = self.run_ctl(
+            "checkpoint", "--summary", "回到文献阶段复核", "--stage", "literature"
+        )
+        self.assertEqual(back.returncode, 0, back.stderr)
+
+        reopened = self.run_ctl(
+            "gate", "reopen", "claim_freeze", "--reason", "重新检查主张依据"
+        )
+
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        state = self.load_state()
+        self.assertEqual(state["current_stage"], "literature")
+        self.assertNotEqual(
+            state["stage_history"][-1]["to_stage"], "experiment_results"
+        )
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_approved_artifact_identity_cannot_be_reused_for_new_content(
+        self,
+    ) -> None:
+        self.initialize()
+        first = self.project / ".research/artifacts/idea/identity-v1.md"
+        self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-IDENTITY",
+            version="1",
+            path=first,
+            content="# Identity v1\n",
+        )
+        self.register_artifact("literature.evidence_base")
+        self.assertEqual(
+            self.run_ctl(
+                "gate", "approve", "idea_freeze", "--reason", "批准版本一"
+            ).returncode,
+            0,
+        )
+        self.assertEqual(
+            self.run_ctl(
+                "gate", "reopen", "idea_freeze", "--reason", "准备版本二"
+            ).returncode,
+            0,
+        )
+        second = self.project / ".research/artifacts/idea/identity-v2.md"
+        self.register_artifact(
+            "idea.idea_card",
+            artifact_id="IDEA-CARD-IDENTITY",
+            version="2",
+            path=second,
+            content="# Identity v2\n",
+        )
+
+        reused = self.project / ".research/artifacts/idea/reused-v1.md"
+        reused.write_text("# Different object claiming to be v1\n", encoding="utf-8")
+        result = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(reused),
+            "--artifact-id",
+            "IDEA-CARD-IDENTITY",
+            "--version",
+            "1",
+            "--status",
+            "approval-ready",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("already bound to different metadata", result.stderr)
+        self.assertEqual(
+            self.load_state()["artifacts"]["idea"]["idea_card"]
+            ["IDEA-CARD-IDENTITY"]["version"],
+            "2",
+        )
+
+    def test_all_artifact_pointer_field_names_are_reserved_as_ids(self) -> None:
+        self.initialize()
+        artifact = self.project / ".research/artifacts/idea/reserved.md"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("reserved\n", encoding="utf-8")
+        for artifact_id in (
+            "path",
+            "artifact_id",
+            "version",
+            "content_hash",
+            "status",
+        ):
+            with self.subTest(artifact_id=artifact_id):
+                reserved = self.run_ctl(
+                    "artifact",
+                    "register",
+                    "idea_card",
+                    "--stage",
+                    "idea",
+                    "--path",
+                    str(artifact),
+                    "--artifact-id",
+                    artifact_id,
+                    "--version",
+                    "1",
+                )
+                self.assertEqual(reserved.returncode, 2)
+                self.assertIn("reserved", reserved.stderr)
+
+    def test_current_control_file_hardlinks_are_rejected_as_evidence(self) -> None:
+        self.initialize()
+        alias = self.project / ".research/artifacts/idea/state-alias.json"
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(self.project / ".research/state.json", alias)
+        except OSError as exc:  # pragma: no cover - filesystem capability
+            unsupported = {
+                errno.EPERM,
+                errno.EXDEV,
+                errno.ENOSYS,
+                getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+            }
+            if exc.errno in unsupported:
+                self.skipTest(f"hardlinks unavailable: {exc}")
+            raise
+        hardlink = self.run_ctl(
+            "artifact",
+            "register",
+            "idea_card",
+            "--stage",
+            "idea",
+            "--path",
+            str(alias),
+            "--artifact-id",
+            "STATE-ALIAS",
+            "--version",
+            "1",
+        )
+        self.assertEqual(hardlink.returncode, 2)
+        self.assertIn("control metadata cannot be registered", hardlink.stderr)
+
+    def test_doctor_rejects_artifact_mapping_key_mismatch(self) -> None:
+        self.initialize()
+        pointer = self.register_artifact(
+            "idea.idea_card", artifact_id="IDEA-CARD-001"
+        )
+        state = self.load_state()
+        bucket = state["artifacts"]["idea"]["idea_card"]
+        del bucket["IDEA-CARD-001"]
+        bucket["WRONG-KEY"] = pointer
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must match its artifact-ID mapping key", result.stdout)
+
+    def test_dotted_artifact_ids_are_not_interpreted_as_nested_registry_keys(
+        self,
+    ) -> None:
+        self.initialize()
+        pointer = self.register_artifact(
+            "idea.idea_card", artifact_id="IDEA.CARD:001"
+        )
+        self.register_artifact("literature.evidence_base")
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        approved = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "批准带点号的稳定 ID"
+        )
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+
+        reopened = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "构造嵌套键反例"
+        )
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        state = self.load_state()
+        state["artifacts"]["idea"]["idea_card"] = {
+            "IDEA": {"CARD:001": pointer}
+        }
+        self.write_state(state)
+        forged = self.run_ctl("doctor")
+        self.assertEqual(forged.returncode, 1)
+        self.assertIn("unknown fields", forged.stdout)
+
+    def test_artifact_identity_is_global_across_current_roles(self) -> None:
+        self.initialize()
+        source = self.project / ".research/artifacts/idea/shared.md"
+        first = self.register_artifact(
+            "idea.idea_card",
+            artifact_id="SHARED-001",
+            version="1",
+            path=source,
+            content="shared immutable object\n",
+        )
+        same = self.run_ctl(
+            "artifact", "register", "alternate_card", "--stage", "idea",
+            "--path", str(source), "--artifact-id", "SHARED-001", "--version", "1",
+            "--status", "approval-ready",
+        )
+        self.assertEqual(same.returncode, 0, same.stderr)
+
+        other = self.project / ".research/artifacts/idea/shared-forged.md"
+        other.write_text("different object\n", encoding="utf-8")
+        conflict = self.run_ctl(
+            "artifact", "register", "third_card", "--stage", "idea",
+            "--path", str(other), "--artifact-id", "SHARED-001", "--version", "1",
+            "--status", "approval-ready",
+        )
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn("already bound to different metadata", conflict.stderr)
+        self.assertEqual(
+            self.load_state()["artifacts"]["idea"]["alternate_card"]["SHARED-001"],
+            first,
+        )
+
+    def test_doctor_rejects_approved_gate_current_artifact_drift(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        approved = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "批准当前证据"
+        )
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+
+        replacement = self.project / ".research/artifacts/idea/unapproved-v2.md"
+        replacement.write_text("# Unapproved replacement\n", encoding="utf-8")
+        state = self.load_state()
+        pointer = next(
+            iter(state["artifacts"]["idea"]["idea_card"].values())
+        )
+        pointer.update(
+            {
+                "path": ".research/artifacts/idea/unapproved-v2.md",
+                "content_hash": "sha256:"
+                + hashlib.sha256(replacement.read_bytes()).hexdigest(),
+            }
+        )
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("current artifacts differ", result.stdout)
+        recovered = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "发现未批准的当前指针漂移"
+        )
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(
+            self.load_state()["gates"]["idea_freeze"]["status"], "reopened"
+        )
+        repaired = self.run_ctl("doctor")
+        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+        self.assertIn("register a new version", repaired.stdout)
+        registered = self.run_ctl(
+            "artifact", "register", "idea_card", "--stage", "idea",
+            "--path", str(replacement), "--artifact-id", str(pointer["artifact_id"]),
+            "--version", "2",
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        final = self.run_ctl("doctor")
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+        self.assertNotIn("register a new version", final.stdout)
+
+    def test_reopen_recovers_upstream_drift_in_reverse_gate_order(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        self.assertEqual(
+            self.run_ctl("gate", "approve", "idea_freeze", "--reason", "批准想法").returncode,
+            0,
+        )
+        self.register_gate_artifacts("method_experiment_approval")
+        self.assertEqual(
+            self.run_ctl(
+                "gate", "approve", "method_experiment_approval", "--reason", "批准实验"
+            ).returncode,
+            0,
+        )
+        state = self.load_state()
+        pointer = next(iter(state["artifacts"]["idea"]["idea_card"].values()))
+        drifted = self.project / ".research/artifacts/idea/drifted-same-version.md"
+        drifted.write_text("drifted same version\n", encoding="utf-8")
+        pointer["path"] = ".research/artifacts/idea/drifted-same-version.md"
+        pointer["content_hash"] = "sha256:" + hashlib.sha256(drifted.read_bytes()).hexdigest()
+        self.write_state(state)
+
+        wrong_order = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "尝试逆序恢复"
+        )
+        self.assertEqual(wrong_order.returncode, 2)
+        self.assertIn("downstream Gate", wrong_order.stderr)
+        downstream = self.run_ctl(
+            "gate", "reopen", "method_experiment_approval", "--reason", "先重开下游"
+        )
+        self.assertEqual(downstream.returncode, 0, downstream.stderr)
+        upstream = self.run_ctl(
+            "gate", "reopen", "idea_freeze", "--reason", "再重开上游"
+        )
+        self.assertEqual(upstream.returncode, 0, upstream.stderr)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_doctor_rejects_impossible_gate_state_machine_histories(self) -> None:
+        baseline = self.initialize()
+
+        def decision(
+            identifier: str, action: str, previous: str, new: str
+        ) -> dict[str, object]:
+            return {
+                "decision_id": identifier,
+                "action": action,
+                "previous_status": previous,
+                "new_status": new,
+                "reason": "构造状态机反例",
+                "actor": "unit-test-researcher",
+                "decided_at": "2026-07-14T00:00:00Z",
+                "artifact_refs": [],
+            }
+
+        cases = {
+            "reopen-from-pending": [
+                decision("DEC-BAD-1", "reopen", "pending", "approved")
+            ],
+            "approve-to-reopened": [
+                decision("DEC-BAD-2", "approve", "pending", "reopened")
+            ],
+            "broken-chain": [
+                decision("DEC-BAD-3A", "approve", "pending", "approved"),
+                decision("DEC-BAD-3B", "approve", "pending", "approved"),
+            ],
+        }
+        malformed_ref = decision("DEC-BAD-4", "approve", "pending", "approved")
+        malformed_ref["artifact_refs"] = ["not-a-pointer"]
+        cases["malformed-artifact-ref"] = [malformed_ref]
+        for label, history in cases.items():
+            with self.subTest(label=label):
+                state = json.loads(json.dumps(baseline))
+                record = state["gates"]["idea_freeze"]
+                record["history"] = history
+                record["status"] = history[-1]["new_status"]
+                record["latest_decision_id"] = history[-1]["decision_id"]
+                self.write_state(state)
+                result = self.run_ctl("doctor")
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_gate_type_fuzz_is_reported_without_tracebacks(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        self.assertEqual(
+            self.run_ctl("gate", "approve", "idea_freeze", "--reason", "建立合法基线").returncode,
+            0,
+        )
+        baseline = self.load_state()
+        cases = {
+            "status-list": ("status", []),
+            "action-list": ("action", []),
+            "previous-object": ("previous_status", {}),
+            "new-list": ("new_status", []),
+        }
+        for label, (field, value) in cases.items():
+            with self.subTest(label=label):
+                state = json.loads(json.dumps(baseline))
+                record = state["gates"]["idea_freeze"]
+                if field == "status":
+                    record[field] = value
+                else:
+                    record["history"][0][field] = value
+                self.write_state(state)
+                result = self.run_ctl("doctor")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_doctor_rejects_gate_history_refs_from_unrequired_roles(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        self.assertEqual(
+            self.run_ctl("gate", "approve", "idea_freeze", "--reason", "批准正确证据").returncode,
+            0,
+        )
+        self.assertEqual(
+            self.run_ctl("gate", "reopen", "idea_freeze", "--reason", "准备伪造引用").returncode,
+            0,
+        )
+        fake = self.project / ".research/artifacts/method/fake.md"
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        fake.write_text("structurally valid but irrelevant\n", encoding="utf-8")
+        reference = {
+            "label": "artifacts.method.not_required.FAKE",
+            "path": ".research/artifacts/method/fake.md",
+            "artifact_id": "FAKE",
+            "version": "1",
+            "content_hash": "sha256:" + hashlib.sha256(fake.read_bytes()).hexdigest(),
+            "status": "current",
+        }
+        state = self.load_state()
+        history = state["gates"]["idea_freeze"]["history"]
+        history[0]["artifact_refs"] = [reference]
+        history[1]["artifact_refs"] = [reference]
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected roles", result.stdout)
+        self.assertIn("missing required roles", result.stdout)
+
+    def test_doctor_rejects_approved_downstream_gate_without_prerequisites(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        decision = {
+            "decision_id": "DEC-FORGED-METHOD",
+            "action": "approve",
+            "previous_status": "pending",
+            "new_status": "approved",
+            "reason": "伪造的下游批准",
+            "actor": "unit-test-researcher",
+            "decided_at": state["updated_at"],
+            "artifact_refs": [],
+        }
+        state["gates"]["method_experiment_approval"] = {
+            "status": "approved",
+            "latest_decision_id": decision["decision_id"],
+            "history": [decision],
+        }
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "approved Gate method_experiment_approval requires approved Gate idea_freeze",
+            result.stdout,
+        )
+
+    def test_doctor_replays_prerequisite_status_at_each_historical_approval(
+        self,
+    ) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        self.assertEqual(
+            self.run_ctl("gate", "approve", "idea_freeze", "--reason", "批准想法").returncode,
+            0,
+        )
+        self.assertEqual(
+            self.run_ctl("gate", "reopen", "idea_freeze", "--reason", "撤回想法批准").returncode,
+            0,
+        )
+        state = self.load_state()
+        base = datetime.fromisoformat(str(state["updated_at"]).replace("Z", "+00:00"))
+
+        def forged(identifier: str, action: str, previous: str, new: str, offset: int) -> dict[str, object]:
+            return {
+                "decision_id": identifier,
+                "action": action,
+                "previous_status": previous,
+                "new_status": new,
+                "reason": "构造历史前置门禁反例",
+                "actor": "unit-test-researcher",
+                "decided_at": (base + timedelta(seconds=offset)).isoformat().replace("+00:00", "Z"),
+                "artifact_refs": [],
+            }
+
+        method_history = [
+            forged("DEC-FORGED-METHOD-APPROVE", "approve", "pending", "approved", 1),
+            forged("DEC-FORGED-METHOD-REOPEN", "reopen", "approved", "reopened", 2),
+        ]
+        state["gates"]["method_experiment_approval"] = {
+            "status": "reopened",
+            "latest_decision_id": "DEC-FORGED-METHOD-REOPEN",
+            "history": method_history,
+        }
+        state["updated_at"] = (base + timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("approval lacks a prior approval", result.stdout)
+
+    def test_doctor_requires_utc_and_monotonic_timestamps(self) -> None:
+        baseline = self.initialize()
+        mutations = {
+            "naive": {"created_at": "2026-07-14T00:00:00"},
+            "non-utc": {"updated_at": "2026-07-14T08:00:00+08:00"},
+            "reverse": {
+                "created_at": "2026-07-14T00:00:01Z",
+                "updated_at": "2026-07-14T00:00:00Z",
+            },
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label):
+                state = json.loads(json.dumps(baseline))
+                state.update(mutation)
+                self.write_state(state)
+                result = self.run_ctl("doctor")
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_doctor_bounds_all_recorded_events_by_state_lifetime(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        state["last_checkpoint"] = {
+            "summary": "伪造未来检查点",
+            "timestamp": "2099-01-01T00:00:00Z",
+        }
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must not be later than updated_at", result.stdout)
+
+    def test_mutations_use_strictly_increasing_timestamps(self) -> None:
+        self.initialize()
+        first = self.run_ctl("checkpoint", "--summary", "第一次快速检查点")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_state = self.load_state()
+        second = self.run_ctl("checkpoint", "--summary", "第二次快速检查点")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        second_state = self.load_state()
+
+        parse = lambda value: datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        self.assertLess(parse(first_state["last_checkpoint"]["timestamp"]), parse(first_state["updated_at"]))
+        self.assertLess(parse(first_state["updated_at"]), parse(second_state["last_checkpoint"]["timestamp"]))
+        self.assertLess(parse(second_state["last_checkpoint"]["timestamp"]), parse(second_state["updated_at"]))
+
+    def test_datetime_exhaustion_fails_cleanly_without_traceback(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        state["updated_at"] = "9999-12-31T23:59:59.999999Z"
+        self.write_state(state)
+
+        result = self.run_ctl("checkpoint", "--summary", "无法推进的检查点")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("timestamps cannot advance", result.stderr)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_hashing_rejects_a_file_that_changes_during_the_read(self) -> None:
+        artifact = self.project / "changing.bin"
+        artifact.write_bytes(b"stable bytes")
+        actual = artifact.stat()
+        before = SimpleNamespace(
+            st_dev=actual.st_dev,
+            st_ino=actual.st_ino,
+            st_size=actual.st_size,
+            st_mtime_ns=actual.st_mtime_ns,
+            st_ctime_ns=actual.st_ctime_ns,
+        )
+        after = SimpleNamespace(**{**before.__dict__, "st_mtime_ns": before.st_mtime_ns + 1})
+        with mock.patch.object(Path, "stat", side_effect=[before, after]):
+            with self.assertRaisesRegex(
+                researchctl_module.ResearchCtlError, "changed while it was being hashed"
+            ):
+                researchctl_module.sha256_file(artifact)
+
+    def test_doctor_links_gate_stage_transitions_to_the_exact_decision(self) -> None:
+        self.initialize()
+        self.register_gate_artifacts("idea_freeze")
+        approved = self.run_ctl(
+            "gate", "approve", "idea_freeze", "--reason", "批准并推进阶段"
+        )
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+        state = self.load_state()
+        state["stage_history"][0]["trigger"] = "gate:idea_freeze:DEC-NOT-REAL"
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("references an unknown Gate decision", result.stdout)
+
+    def test_corrupt_state_inputs_fail_cleanly_without_tracebacks(self) -> None:
+        self.initialize()
+        state_path = self.project / ".research/state.json"
+        payloads = {
+            "invalid-utf8": b"\xff\xfe",
+            "truncated-json": b'{"enabled": true',
+            "excessive-nesting": (
+                b'{"nested":' + (b"[" * 1800) + b"0" + (b"]" * 1800) + b"}"
+            ),
+        }
+        for label, payload in payloads.items():
+            with self.subTest(label=label):
+                state_path.write_bytes(payload)
+                result = self.run_ctl("doctor")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_nul_artifact_path_is_reported_without_a_traceback(self) -> None:
+        self.initialize()
+        state = self.load_state()
+        state["artifacts"] = {
+            "idea": {
+                "idea_card": {
+                    "IDEA-CARD-NUL": {
+                        "path": "bad\u0000path",
+                        "artifact_id": "IDEA-CARD-NUL",
+                        "version": "1",
+                        "content_hash": "sha256:" + ("0" * 64),
+                        "status": "draft",
+                    }
+                }
+            }
+        }
+        self.write_state(state)
+
+        result = self.run_ctl("doctor")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot be resolved", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_doctor_requires_artifact_workspace_and_init_reports_disabled_truthfully(
+        self,
+    ) -> None:
+        self.initialize()
+        disabled = self.run_ctl("disable")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        repeated = self.run_ctl("init")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertIn("remains disabled", repeated.stdout)
+        self.assertNotIn("workflow enabled for", repeated.stdout)
+
+        (self.project / ".research/artifacts").rmdir()
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("missing artifact workspace", doctor.stdout)
+
+    def test_policy_state_contract_drift_fails_closed(self) -> None:
+        self.initialize()
+        for field, replacement in (
+            ("required_fields", []),
+            ("stage_ids", ["idea"]),
+            ("gate_ids", ["idea_freeze"]),
+            ("gate_statuses", ["pending", "approved", "reopened", "forged"]),
+            ("gate_actions", ["approve"]),
+            ("artifact_pointer_fields", ["path", "artifact_id"]),
+        ):
+            with self.subTest(field=field):
+                policy = policy_document()
+                policy["state_contract"][field] = replacement
+                self.policy.write_text(
+                    json.dumps(policy, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                result = self.run_ctl("doctor")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"state_contract.{field}", result.stderr)
+
+    def test_unicode_project_without_git_initializes_and_audits(self) -> None:
+        project = Path(self.temporary.name) / "无人机-研究"
+        project.mkdir()
+        result = self.run_ctl("init", cwd=project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        memory = (project / ".research/memory.md").read_text(encoding="utf-8")
+        self.assertIn("# 研究记忆：无人机-研究", memory)
+        doctor = self.run_ctl("doctor", cwd=project)
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertIn("Git worktree not detected", doctor.stdout)
+
+    def test_shipped_policy_full_two_release_flow(self) -> None:
+        self.policy = ROOT / "skills/research/references/policy.yaml"
+        self.initialize()
+        for gate in (
+            "idea_freeze",
+            "method_experiment_approval",
+            "claim_freeze",
+        ):
+            self.register_gate_artifacts(gate)
+            approved = self.run_ctl(
+                "gate", "approve", gate, "--reason", f"真实策略审查通过：{gate}"
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+
+        self.register_gate_artifacts(
+            "release", release_target="initial_submission"
+        )
+        initial = self.run_ctl(
+            "gate", "approve", "release", "--reason", "初投稿发布包已人工审核"
+        )
+        self.assertEqual(initial.returncode, 0, initial.stderr)
+        reopened = self.run_ctl(
+            "gate", "reopen", "release", "--reason", "收到审稿意见，进入返修"
+        )
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+
+        self.register_gate_artifacts(
+            "release", release_target="revision_rebuttal"
+        )
+        revision = self.run_ctl(
+            "gate", "approve", "release", "--reason", "返修与回复发布包已人工审核"
+        )
+        self.assertEqual(revision.returncode, 0, revision.stderr)
+        state = self.load_state()
+        release_history = state["gates"]["release"]["history"]
+        self.assertEqual(
+            [entry["release_target"] for entry in release_history],
+            ["initial_submission", "initial_submission", "revision_rebuttal"],
+        )
+        self.assertEqual(len(list(self.project.rglob("*.md"))), 26)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
 
     def test_legacy_state_is_conservatively_migrated_and_preserved(self) -> None:
         research = self.project / ".research"

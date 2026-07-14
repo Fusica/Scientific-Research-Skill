@@ -1,0 +1,10 @@
+[run]
+branch = True
+source = scripts
+parallel = True
+patch = subprocess
+
+[report]
+fail_under = 72
+show_missing = True
+skip_empty = True

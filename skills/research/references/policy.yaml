@@ -21,10 +21,14 @@
       "workflow_version",
       "enabled",
       "project_id",
+      "project_name",
       "current_stage",
       "gates",
       "artifacts",
-      "last_checkpoint"
+      "last_checkpoint",
+      "stage_history",
+      "created_at",
+      "updated_at"
     ],
     "stage_ids": [
       "idea",
@@ -48,6 +52,11 @@
     "generated_root": ".research/artifacts",
     "stage_path_template": ".research/artifacts/<stage-id>",
     "instruction": "Write new workflow artifacts under .research/artifacts/<stage-id>/; never create project-root research/, contracts/, or artifacts/. Register existing user files in place."
+  },
+  "review_language": {
+    "internal_review_default": "zh-CN",
+    "formal_output_default": "en",
+    "instruction": ".research 中需要人工审核或维护的中间产物、memory、checkpoint summary 和 Gate reason 采用中文骨干；论文、返修回复、代码及注释保持英文；JSON/YAML 字段、ID、枚举、路径、命令、公式、原始引文、书目信息与原始日志保持英文或原文。"
   },
   "gates": {
     "idea_freeze": {

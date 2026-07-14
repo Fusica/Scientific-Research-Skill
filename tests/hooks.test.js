@@ -157,7 +157,10 @@ function runHook(event, cwd, overrides = {}, options = {}) {
     input: JSON.stringify(input),
     encoding: "utf8",
     env: environment,
+    timeout: 6000,
   });
+  assert.equal(result.error, undefined, result.error && result.error.message);
+  assert.equal(result.signal, null, "Hook must not hang or be terminated by a signal");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "", "Hook must not use stderr for ordinary outcomes");
   assert.notEqual(result.stdout.trim(), "", "Hook must emit one JSON object");
@@ -170,7 +173,10 @@ function runRaw(event, cwd, raw) {
     input: raw,
     encoding: "utf8",
     env: { ...process.env, PLUGIN_ROOT: pluginRoot },
+    timeout: 6000,
   });
+  assert.equal(result.error, undefined, result.error && result.error.message);
+  assert.equal(result.signal, null, "Hook must not hang or be terminated by a signal");
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -371,6 +377,7 @@ test("UserPromptSubmit injects a compact current-stage boundary for research wor
   assert.match(context, /claim_freeze \(pending\)/);
   assert.match(context, /\.research\/artifacts\/<stage-id>/);
   assert.match(context, /project-root research\/, contracts\/, or artifacts\//);
+  assert.match(context, /policy\.yaml review_language/);
   assert.match(context, /Use the \$research Skill/);
   cleanup(fixture.temporary);
 });
@@ -651,7 +658,7 @@ test("PostToolUse validates touched state and artifact pointers with exact outpu
     "hookEventName",
   ]);
   assert.equal(output.hookSpecificOutput.hookEventName, "PostToolUse");
-  assert.match(output.hookSpecificOutput.additionalContext, /Schema and Gate invariants: valid/);
+  assert.match(output.hookSpecificOutput.additionalContext, /Quick structural state\/Gate checks found no issue/);
   assert.match(output.hookSpecificOutput.additionalContext, /missing-runs\.json/);
   assert.equal(Object.prototype.hasOwnProperty.call(output, "decision"), false);
   cleanup(fixture.temporary);
@@ -667,7 +674,7 @@ test("PostToolUse recognizes researchctl artifact registration as a state mutati
     tool_response: { stdout: "registered artifact", exit_code: 0 },
   });
   assert.equal(output.hookSpecificOutput.hookEventName, "PostToolUse");
-  assert.match(output.hookSpecificOutput.additionalContext, /Schema and Gate invariants: valid/);
+  assert.match(output.hookSpecificOutput.additionalContext, /authoritative hash verification/);
   cleanup(fixture.temporary);
 });
 
@@ -846,5 +853,644 @@ test("Stop audits short Chinese material claims", () => {
     stop_hook_active: false,
   });
   assert.equal(output.decision, "block");
+  cleanup(fixture.temporary);
+});
+
+test("event disagreement between argv and stdin returns no decision", () => {
+  const fixture = createProject();
+  const disguised = officialInput("SessionStart", fixture.project);
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {}, { input: disguised }), {});
+  cleanup(fixture.temporary);
+});
+
+test("a valid multi-hundred-KiB state keeps every Hook event active", () => {
+  const fixture = createProject({
+    state: makeState({ stress_padding: "x".repeat(384 * 1024) }),
+  });
+  const session = runHook("SessionStart", fixture.project);
+  assert.equal(session.hookSpecificOutput.hookEventName, "SessionStart");
+  const pre = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "rm -r -f results" },
+  });
+  assert.equal(pre.hookSpecificOutput.permissionDecision, "deny");
+  const post = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "researchctl status" },
+  });
+  assert.equal(post.hookSpecificOutput.hookEventName, "PostToolUse");
+  const stop = runHook("Stop", fixture.project, {
+    last_assistant_message: "Table 2 reports top-1 accuracy of 91.2%.",
+  });
+  assert.equal(stop.decision, "block");
+  cleanup(fixture.temporary);
+});
+
+test("large official tool responses do not truncate the Hook input envelope", () => {
+  const fixture = createProject();
+  const output = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "researchctl status" },
+    tool_response: { stdout: "x".repeat(512 * 1024), exit_code: 0 },
+  });
+  assert.equal(output.hookSpecificOutput.hookEventName, "PostToolUse");
+  assert.match(output.hookSpecificOutput.additionalContext, /QUICK CHECK/);
+  cleanup(fixture.temporary);
+});
+
+test("state mutation detection covers shell wrappers PowerShell sponge and the transaction lock", () => {
+  const fixture = createProject();
+  for (const command of [
+    "sh -c 'cd .research && rm state.json'",
+    "bash -lc 'cd .research && truncate -s 0 state.json'",
+    "Set-Location .research; Remove-Item state.json",
+    "jq '.enabled=false' .research/state.json | sponge .research/state.json",
+    "rm .research/state.lock",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("state mutation detection resolves symlink workdirs and scans every path field", () => {
+  const fixture = createProject();
+  const alias = path.join(fixture.temporary, "research-alias");
+  fs.symlinkSync(path.join(fixture.project, ".research"), alias, "dir");
+  const symlinked = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "rm state.json", workdir: alias },
+  });
+  assert.equal(symlinked.hookSpecificOutput.permissionDecision, "deny");
+  const directoryAlias = path.join(fixture.project, "state-link");
+  fs.symlinkSync(path.join(fixture.project, ".research"), directoryAlias, "dir");
+  const changedIntoAlias = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "cd state-link && rm state.json" },
+  });
+  assert.equal(changedIntoAlias.hookSpecificOutput.permissionDecision, "deny");
+
+  const files = Array.from({ length: 48 }, (_, index) => ({ path: `ordinary-${index}.txt` }));
+  files.push({ path: ".research/state.json" });
+  const batched = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__files__update",
+    tool_input: { files },
+  });
+  assert.equal(batched.hookSpecificOutput.permissionDecision, "deny");
+  cleanup(fixture.temporary);
+});
+
+test("dangerous command table covers split flags git global options and dry runs", () => {
+  const fixture = createProject();
+  for (const command of [
+    "rm -r -f results",
+    "rm --recursive --force results",
+    "git -C another-repo reset --hard",
+    "git checkout HEAD -- .",
+    "git clean --force -d",
+    "git clean -f",
+    "git restore --staged --worktree .",
+    "Remove-Item -Recurse -Force results",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  for (const command of [
+    "git clean -n -d",
+    "git clean --dry-run -d",
+    "git restore --staged main.tex",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("experiment launch table blocks common runners without blocking test utilities", () => {
+  const fixture = createProject();
+  for (const command of [
+    "torchrun --nproc_per_node=8 train.py",
+    "accelerate launch scripts/train.py",
+    "deepspeed train_model.py",
+    "python -m project.train --config run.yaml",
+    "python scripts/my_train.py",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /method_experiment_approval/);
+  }
+  for (const command of [
+    "python test_training.py",
+    "python training_utils.py",
+    "pytest tests/test_training.py",
+    "python -m pytest tests/train.py",
+    "torchrun --help",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("manuscript mutation table covers ordinary filesystem commands", () => {
+  const fixture = createProject();
+  for (const command of [
+    "cp draft.tex main.tex",
+    "mv revised.tex rebuttal.tex",
+    "rm appendix.tex",
+    "truncate -s 0 response.md",
+    "rsync draft.tex paper.tex",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /claim_freeze/);
+  }
+  for (const command of ["cat main.tex", "git diff -- main.tex", "wc -l rebuttal.tex"]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "cp main.tex backup.tex" },
+  }), {});
+  const sponge = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "pandoc draft.md | sponge main.tex" },
+  });
+  assert.equal(sponge.hookSpecificOutput.permissionDecision, "deny");
+  cleanup(fixture.temporary);
+});
+
+test("release detection covers explicit submission transfers but permits backups", () => {
+  const fixture = createProject();
+  const submission = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "scp paper.pdf editor@example.org:/submissions/" },
+  });
+  assert.equal(submission.hookSpecificOutput.permissionDecision, "deny");
+  const backup = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "scp paper.pdf backup@example.org:/archive/" },
+  });
+  assert.deepEqual(backup, {});
+  const chair = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "scp rebuttal.pdf chair@example.org:/incoming/" },
+  });
+  assert.equal(chair.hookSpecificOutput.permissionDecision, "deny");
+  const download = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "curl https://openreview.net/paper.pdf -o paper.pdf" },
+  });
+  assert.deepEqual(download, {});
+  cleanup(fixture.temporary);
+});
+
+test("PostToolUse calls its validation quick and rejects drifted fields and timestamps", () => {
+  const fixture = createProject({
+    state: makeState({
+      created_at: "2026-07-14T00:00:00",
+      artifacts: {
+        idea: {
+          idea_card: {
+            "WRONG-KEY": {
+              path: ".research/memory.md",
+              artifact_id: "IDEA-CARD-1",
+              version: true,
+              content_hash: "not-a-hash",
+              status: "",
+            },
+          },
+        },
+      },
+    }),
+  });
+  const output = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "researchctl status" },
+  });
+  const context = output.hookSpecificOutput.additionalContext;
+  assert.match(context, /QUICK CHECK/);
+  assert.match(context, /created_at must be a timezone-explicit UTC timestamp/);
+  assert.match(context, /research control metadata/);
+  assert.equal(context.includes("Schema and Gate invariants: valid"), false);
+  cleanup(fixture.temporary);
+});
+
+test("PostToolUse detects control-file symlink and hardlink artifact aliases", (t) => {
+  const fixture = createProject();
+  const artifactDirectory = path.join(fixture.project, ".research", "artifacts", "idea");
+  fs.mkdirSync(artifactDirectory, { recursive: true });
+  const aliases = [path.join(artifactDirectory, "state-symlink.json")];
+  fs.symlinkSync(path.join(fixture.project, ".research", "state.json"), aliases[0]);
+  const hardlink = path.join(artifactDirectory, "state-hardlink.json");
+  try {
+    fs.linkSync(path.join(fixture.project, ".research", "state.json"), hardlink);
+    aliases.push(hardlink);
+  } catch (_error) {
+    t.diagnostic("hardlinks are unavailable on this filesystem");
+  }
+  for (const [index, alias] of aliases.entries()) {
+    const relative = path.relative(fixture.project, alias);
+    const state = makeState({
+      artifacts: {
+        idea: {
+          idea_card: {
+            [`IDEA-${index}`]: {
+              path: relative,
+              artifact_id: `IDEA-${index}`,
+              version: "1",
+              content_hash: `sha256:${"0".repeat(64)}`,
+              status: "current",
+            },
+          },
+        },
+      },
+    });
+    write(path.join(fixture.project, ".research", "state.json"), `${JSON.stringify(state)}\n`);
+    const output = runHook("PostToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command: "researchctl status" },
+    });
+    assert.match(output.hookSpecificOutput.additionalContext, /research control metadata/);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("Prompt routing recognizes failing tests lint and typecheck as code-only", () => {
+  const fixture = createProject();
+  for (const prompt of [
+    "Why does this test fail?",
+    "Investigate the failing CI test.",
+    "Run lint and typecheck.",
+    "为什么这个测试失败？",
+  ]) {
+    assert.deepEqual(runHook("UserPromptSubmit", fixture.project, { prompt }), {}, prompt);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("Stop separates code metric repairs from material top-1 claims", () => {
+  const fixture = createProject();
+  const code = runHook("Stop", fixture.project, {
+    last_assistant_message: "Fixed the metric parser bug that incorrectly reported accuracy improved by 12%; unit tests pass.",
+    stop_hook_active: false,
+  });
+  assert.deepEqual(code, {});
+  const claim = runHook("Stop", fixture.project, {
+    last_assistant_message: "Table 2 reports a top-1 score of 91.2%, and the conclusions were updated accordingly.",
+    stop_hook_active: false,
+  });
+  assert.equal(claim.decision, "block");
+  const mixed = runHook("Stop", fixture.project, {
+    last_assistant_message: "Fixed the analysis script bug; mAP improved by 2.3%, supporting the central claim.",
+    stop_hook_active: false,
+  });
+  assert.equal(mixed.decision, "block");
+  cleanup(fixture.temporary);
+});
+
+test("deep and wide Hook inputs cannot bypass state protection or crash quick validation", () => {
+  const fixture = createProject();
+  const envelope = officialInput("PreToolUse", fixture.project, { tool_name: "mcp__files__update" });
+  delete envelope.tool_input;
+  const deepToolInput = `${'{"nested":'.repeat(12000)}{"path":".research/state.json"}${"}".repeat(12000)}`;
+  const deepRaw = `${JSON.stringify(envelope).slice(0, -1)},"tool_input":${deepToolInput}}`;
+  const deepOutput = runRaw("PreToolUse", fixture.project, deepRaw);
+  assert.equal(deepOutput.hookSpecificOutput.permissionDecision, "deny");
+
+  const wide = Array.from({ length: 150000 }, () => ({}));
+  wide.push({ path: ".research/state.json" });
+  const wideOutput = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__files__update",
+    tool_input: { files: wide },
+  });
+  assert.equal(wideOutput.hookSpecificOutput.permissionDecision, "deny");
+
+  const state = makeState();
+  delete state.artifacts;
+  const deepArtifacts = `${'{"x":'.repeat(8000)}null${"}".repeat(8000)}`;
+  const rawState = `${JSON.stringify(state).slice(0, -1)},"artifacts":{"_legacy":${deepArtifacts}}}`;
+  write(path.join(fixture.project, ".research", "state.json"), rawState);
+  const post = runHook("PostToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "researchctl status" },
+  });
+  assert.match(post.hookSpecificOutput.additionalContext, /QUICK CHECK/);
+  cleanup(fixture.temporary);
+});
+
+test("state authority protection covers patch moves structured tools control directories and nested shells", () => {
+  const fixture = createProject();
+  const commands = [
+    "rm -r .research",
+    "mv .research research-backup",
+    "rm .research/state.*",
+    "find .research -type f -delete",
+    "truncate -s 0 .research/state.*",
+    "chmod 000 .research",
+    "Remove-Item -Recurse .research",
+    "Move-Item .research research-backup",
+    "Rename-Item .research research-old",
+    "bash -lc 'rm -r .research'",
+    "bash -lc 'cd .research && rm -r *'",
+    "cd .research && echo broken>state.json",
+  ];
+  for (const command of commands) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  const cwdOutput = runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "find . -delete", workdir: ".research" },
+  });
+  assert.equal(cwdOutput.hookSpecificOutput.permissionDecision, "deny");
+
+  for (const [tool_name, tool_input] of [
+    ["mcp__filesystem__move_file", { source: ".research/state.json", destination: "backup.json" }],
+    ["mcp__filesystem__rename", { oldPath: ".research/state.json", newPath: "backup.json" }],
+    ["mcp__filesystem__delete", { filename: ".research/state.json" }],
+    ["mcp__filesystem__delete_directory", { path: ".research" }],
+    ["mcp__filesystem__move_directory", { source: ".research", destination: "research-backup" }],
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, { tool_name, tool_input });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", tool_name);
+  }
+  const patchMove = runHook("PreToolUse", fixture.project, {
+    tool_name: "apply_patch",
+    tool_input: { patch: "*** Begin Patch\n*** Update File: harmless.json\n*** Move to: .research/state.json\n*** End Patch" },
+  });
+  assert.equal(patchMove.hookSpecificOutput.permissionDecision, "deny");
+
+  const stateAlias = path.join(fixture.project, "state-alias.json");
+  fs.symlinkSync(path.join(fixture.project, ".research", "state.json"), stateAlias);
+  const aliasWrite = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__filesystem__write_file",
+    tool_input: { path: "state-alias.json", content: "{}" },
+  });
+  assert.equal(aliasWrite.hookSpecificOutput.permissionDecision, "deny");
+  const stateHardlink = path.join(fixture.project, "state-hardlink.json");
+  try {
+    fs.linkSync(path.join(fixture.project, ".research", "state.json"), stateHardlink);
+    const hardlinkWrite = runHook("PreToolUse", fixture.project, {
+      tool_name: "mcp__filesystem__write_file",
+      tool_input: { path: "state-hardlink.json", content: "{}" },
+    });
+    assert.equal(hardlinkWrite.hookSpecificOutput.permissionDecision, "deny");
+  } catch (error) {
+    if (!["EPERM", "EACCES", "ENOTSUP", "EXDEV"].includes(error.code)) throw error;
+  }
+  cleanup(fixture.temporary);
+});
+
+test("dangerous shell parsing handles quotes wrappers and common destructive git variants", () => {
+  const fixture = createProject();
+  for (const command of [
+    "rm '-rf' results",
+    "git restore --staged -W .",
+    "git checkout HEAD main.tex",
+    "git checkout --ours main.tex",
+    "git -c core.autocrlf=false reset --hard",
+    "git --no-pager reset --hard",
+    "bash -lc 'rm -rf results'",
+    "sh -c 'git reset --hard'",
+    "zsh -c 'git clean -f'",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  for (const command of [
+    "echo 'rm -r -f results'",
+    "echo 'git reset --hard'",
+    "git checkout feature-branch",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("experiment launch detection handles compound commands help flags and server wrappers", () => {
+  const fixture = createProject();
+  for (const command of [
+    "python -m pytest tests; torchrun train.py",
+    "python -m unittest tests; sbatch train.sh",
+    "sbatch train.sh; torchrun --help",
+    "qsub run.sh && deepspeed --version",
+    "srun python train.py",
+    "mpirun python train.py",
+    "mpiexec python train.py",
+    "torchrun train.py --help",
+    "deepspeed train.py --version",
+    "accelerate launch train.py -h",
+    "nohup torchrun --nproc_per_node=8 train.py > train.log 2>&1 &",
+    "env CUDA_VISIBLE_DEVICES=0 torchrun train.py",
+    "time deepspeed train.py",
+    "bash -lc 'torchrun train.py'",
+    "python -m project.training --config x",
+    "make train",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  for (const command of [
+    "torchrun --help",
+    "deepspeed --version",
+    "accelerate launch -h",
+    "srun --help",
+    "mpirun --version",
+    "echo 'python train.py'",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("manuscript protection follows actual mutation direction patch targets and registered paths", () => {
+  const fixture = createProject({
+    state: makeState({
+      artifacts: {
+        paper: {
+          manuscript: {
+            "MANUSCRIPT-CUSTOM": {
+              path: "paper/custom-submission.tex",
+              artifact_id: "MANUSCRIPT-CUSTOM",
+              version: "1",
+              content_hash: `sha256:${"0".repeat(64)}`,
+              status: "current",
+            },
+            "MANUSCRIPT-OPAQUE": {
+              path: "paper/custom-submission.xyz",
+              artifact_id: "MANUSCRIPT-OPAQUE",
+              version: "1",
+              content_hash: `sha256:${"1".repeat(64)}`,
+              status: "current",
+            },
+          },
+        },
+      },
+    }),
+  });
+  write(path.join(fixture.project, "paper", "custom-submission.tex"), "custom manuscript\n");
+  write(path.join(fixture.project, "paper", "custom-submission.xyz"), "opaque manuscript\n");
+  for (const command of [
+    "mv main.tex backup.tex",
+    "bash -lc 'rm main.tex'",
+    "echo hi>main.tex",
+    "cat draft.md>>rebuttal.tex",
+    "python x.py 2>paper.md",
+    "rm -r paper",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  for (const command of [
+    "rm scratch && cat main.tex",
+    "cp main.tex backup.tex",
+    "echo 'literal >main.tex'",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  const move = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__filesystem__move_file",
+    tool_input: { source: "main.tex", destination: "backup.tex" },
+  });
+  assert.equal(move.hookSpecificOutput.permissionDecision, "deny");
+  const registeredMove = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__filesystem__move_file",
+    tool_input: { source: "paper/custom-submission.tex", destination: "backup.tex" },
+  });
+  assert.equal(registeredMove.hookSpecificOutput.permissionDecision, "deny");
+  const registeredParentDelete = runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__filesystem__delete_directory",
+    tool_input: { path: "paper" },
+  });
+  assert.equal(registeredParentDelete.hookSpecificOutput.permissionDecision, "deny");
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+    tool_name: "mcp__filesystem__copy_file",
+    tool_input: { source: "main.tex", destination: "backup.tex" },
+  }), {});
+  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+    tool_name: "apply_patch",
+    tool_input: { patch: "*** Begin Patch\n*** Update File: README.md\n@@\n+See main.tex\n*** End Patch" },
+  }), {});
+  const patchMove = runHook("PreToolUse", fixture.project, {
+    tool_name: "apply_patch",
+    tool_input: { patch: "*** Begin Patch\n*** Update File: draft.tex\n*** Move to: supplement.tex\n*** End Patch" },
+  });
+  assert.equal(patchMove.hookSpecificOutput.permissionDecision, "deny");
+  cleanup(fixture.temporary);
+});
+
+test("release transfer detection distinguishes uploads from downloads across common CLIs", () => {
+  const fixture = createProject();
+  for (const command of [
+    "scp paper.pdf conference:/submissions/",
+    "rsync rebuttal.pdf conference:/incoming/",
+    "aws s3 cp paper.pdf s3://bucket/submissions/paper.pdf",
+    "curl -Tpaper.pdf https://openreview.net/submissions/paper.pdf",
+    "curl -Ffile=@paper.pdf https://openreview.net/submissions/",
+    "curl --data-binary @paper.pdf https://openreview.net/submissions/",
+    "curl -X POST --json @paper.json https://openreview.net/submissions/",
+    "bash -lc 'scp paper.pdf conference:/submissions/'",
+  ]) {
+    const output = runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    assert.equal(output.hookSpecificOutput.permissionDecision, "deny", command);
+  }
+  for (const command of [
+    "scp chair@conference.org:/incoming/rebuttal.pdf rebuttal.pdf",
+    "aws s3 cp s3://bucket/submissions/paper.pdf paper.pdf",
+    "curl https://openreview.net/forum?id=123",
+    "curl -L https://openreview.net/paper.pdf -o paper.pdf",
+  ]) {
+    assert.deepEqual(runHook("PreToolUse", fixture.project, {
+      tool_name: "Bash",
+      tool_input: { command },
+    }), {}, command);
+  }
+  cleanup(fixture.temporary);
+});
+
+test("prompt and Stop routing separates code detail from mixed and material scientific claims", () => {
+  const fixture = createProject();
+  for (const prompt of [
+    "What does this function do?",
+    "What is this class for?",
+    "Review the git diff.",
+    "Why does pytest fail?",
+    "Explain the regex.",
+    "Can you simplify this SQL query?",
+  ]) {
+    assert.deepEqual(runHook("UserPromptSubmit", fixture.project, { prompt }), {}, prompt);
+  }
+  for (const prompt of [
+    "Inspect the failing hypothesis test.",
+    "Fix the experiment result parser, then assess accuracy on the final runs.",
+    "Refactor accuracy calculation, then compare mAP against baseline.",
+    "修复实验结果解析器，然后评估最终运行的准确率。",
+  ]) {
+    const output = runHook("UserPromptSubmit", fixture.project, { prompt });
+    assert.match(output.hookSpecificOutput.additionalContext, /PROMPT RELEVANT/, prompt);
+  }
+  for (const message of [
+    "Fixed the script bug; accuracy improved by 12%.",
+    "Table 2 reports 91.2% top-1 accuracy on the held-out set.",
+    "RMSE decreased to 0.42.",
+    "The difference was significant (p=0.03, 95% CI 0.1-0.4).",
+    "Three failed runs were excluded from analysis.",
+    "No significant difference was found.",
+    "修复脚本后，准确率提升了12%。",
+  ]) {
+    const output = runHook("Stop", fixture.project, {
+      last_assistant_message: message,
+      stop_hook_active: false,
+    });
+    assert.equal(output.decision, "block", message);
+  }
+  assert.deepEqual(runHook("Stop", fixture.project, {
+    last_assistant_message: "Fixed the parser that incorrectly reported accuracy improved by 12%; tests pass.",
+    stop_hook_active: false,
+  }), {});
   cleanup(fixture.temporary);
 });

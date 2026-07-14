@@ -1,31 +1,31 @@
-# Research Memory
+# 研究记忆：{{PROJECT_NAME}}
 
-> Project-local navigation memory only. It is not scientific evidence, Gate authority, or a transcript. Link every verified statement to a canonical artifact, source, run, or analysis ID.
+> 仅用于当前项目的导航性持久化记忆，不是科学证据、Gate 授权或对话转录。每条已验证事实都应链接到 canonical artifact、source、run 或 analysis ID。
 
-## Research Kernel
+## 研究内核
 
-- Problem:
-- Current hypothesis or contribution:
-- Scope and boundary conditions:
-- Current stage:
+- 研究问题：
+- 当前假设或贡献：
+- 范围与边界条件：
+- 当前阶段（保留 stage ID）：
 
-## Verified Facts
+## 已验证事实
 
-- None yet.
+- 暂无。
 
-## Decisions and Rationale
+## 决策及理由
 
-- None yet.
+- 暂无。
 
-## Failed Attempts and Lessons
+## 失败尝试与经验
 
-- None yet.
+- 暂无。
 
-## Open Questions
+## 开放问题
 
-- None yet.
+- 暂无。
 
-## Next Checkpoint
+## 下一检查点
 
-- Next smallest action:
-- Required input or evidence:
+- 下一项最小行动：
+- 所需输入或证据：

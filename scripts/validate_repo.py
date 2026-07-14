@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.1.2"
+PLUGIN_VERSION = "1.1.3"
 SCHEMA_VERSION = "1.0"
 WORKFLOW_VERSION = "1.1.0"
 
@@ -34,6 +34,20 @@ GATES = [
     "method_experiment_approval",
     "claim_freeze",
     "release",
+]
+STATE_FIELDS = [
+    "schema_version",
+    "workflow_version",
+    "enabled",
+    "project_id",
+    "project_name",
+    "current_stage",
+    "gates",
+    "artifacts",
+    "last_checkpoint",
+    "stage_history",
+    "created_at",
+    "updated_at",
 ]
 GATE_ADVANCE = {
     "idea_freeze": "method",
@@ -215,6 +229,7 @@ def validate_skill() -> list[str]:
             "gate_order",
             "state_contract",
             "artifact_layout",
+            "review_language",
             "gates",
             "allowed_transitions",
             "stages",
@@ -231,6 +246,16 @@ def validate_skill() -> list[str]:
     state_contract = require_mapping(
         policy.get("state_contract"), "policy.yaml state_contract", errors
     )
+    contract_expectations = {
+        "required_fields": STATE_FIELDS,
+        "stage_ids": STAGES,
+        "gate_ids": GATES,
+        "gate_statuses": ["pending", "approved", "reopened"],
+        "gate_actions": ["approve", "reopen"],
+    }
+    for field, expected in contract_expectations.items():
+        if state_contract.get(field) != expected:
+            errors.append(f"policy.yaml: state_contract.{field} mismatch")
     if state_contract.get("artifact_pointer_fields") != [
         "path",
         "artifact_id",
@@ -258,6 +283,29 @@ def validate_skill() -> list[str]:
         or "contracts/" not in layout_instruction
     ):
         errors.append("policy.yaml: artifact layout instruction is incomplete")
+    review_language = require_keys(
+        policy.get("review_language"),
+        {
+            "internal_review_default",
+            "formal_output_default",
+            "instruction",
+        },
+        "policy.yaml review_language",
+        errors,
+    )
+    if review_language.get("internal_review_default") != "zh-CN":
+        errors.append("policy.yaml: internal review language must be zh-CN")
+    if review_language.get("formal_output_default") != "en":
+        errors.append("policy.yaml: formal output language must be en")
+    language_instruction = review_language.get("instruction")
+    if (
+        not isinstance(language_instruction, str)
+        or ".research" not in language_instruction
+        or "中文" not in language_instruction
+        or "英文" not in language_instruction
+        or "JSON/YAML" not in language_instruction
+    ):
+        errors.append("policy.yaml: review language instruction is incomplete")
     if policy.get("stage_order") != STAGES:
         errors.append("policy.yaml: stage_order must contain the six canonical stages")
     if policy.get("gate_order") != GATES:
@@ -355,16 +403,7 @@ def validate_skill() -> list[str]:
     state = load_json(skill / "assets/state.template.json", errors)
     state = require_keys(
         state,
-        {
-            "schema_version",
-            "workflow_version",
-            "enabled",
-            "project_id",
-            "current_stage",
-            "gates",
-            "artifacts",
-            "last_checkpoint",
-        },
+        set(STATE_FIELDS),
         "state.template.json",
         errors,
     )
@@ -372,8 +411,20 @@ def validate_skill() -> list[str]:
         errors.append("state.template.json: schema_version mismatch")
     if state.get("workflow_version") != WORKFLOW_VERSION:
         errors.append("state.template.json: workflow_version mismatch")
+    if set(state) != set(STATE_FIELDS):
+        errors.append("state.template.json: fields must match state_contract.required_fields")
+    if state.get("enabled") is not True:
+        errors.append("state.template.json: enabled must start true")
+    if state.get("project_id") != "" or state.get("project_name") != "":
+        errors.append("state.template.json: project identity placeholders must be empty")
     if state.get("current_stage") != STAGES[0]:
         errors.append("state.template.json: current_stage must start at idea")
+    if state.get("artifacts") != {} or state.get("last_checkpoint") is not None:
+        errors.append("state.template.json: artifacts/checkpoint must start empty")
+    if state.get("stage_history") != []:
+        errors.append("state.template.json: stage_history must start empty")
+    if state.get("created_at") is not None or state.get("updated_at") is not None:
+        errors.append("state.template.json: timestamp placeholders must be null")
     state_gates = require_mapping(state.get("gates"), "state.template.json gates", errors)
     if set(state_gates) != set(GATES):
         errors.append("state.template.json: gate set mismatch")
@@ -389,12 +440,12 @@ def validate_skill() -> list[str]:
 
     memory = (skill / "assets/memory.template.md").read_text(encoding="utf-8")
     for heading in (
-        "Research Kernel",
-        "Verified Facts",
-        "Decisions and Rationale",
-        "Failed Attempts and Lessons",
-        "Open Questions",
-        "Next Checkpoint",
+        "研究内核",
+        "已验证事实",
+        "决策及理由",
+        "失败尝试与经验",
+        "开放问题",
+        "下一检查点",
     ):
         if heading not in memory:
             errors.append(f"memory.template.md: missing section {heading}")

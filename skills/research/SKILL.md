@@ -40,10 +40,11 @@ Use another stage only when the request requires a direct handoff or evidence ha
 - Preserve failed, excluded, null, negative, and contradictory evidence with reasons. Trace promoted claims backward to evidence and forward to manuscript and review artifacts.
 - Treat `.research/memory.md` only as bounded navigation context, never as evidence or approval authority.
 - Before creating a workflow-owned artifact, follow `artifact_layout` from policy as the sole output-location contract; do not invent parallel artifact roots.
+- Follow `review_language` from policy for internal review material, persistent narrative state, and formal-output exceptions.
 
 ## Update state safely
 
-- Register every material canonical artifact before a downstream handoff with `researchctl artifact register <role> --stage <stage-id> --path <file> --artifact-id <id> --version <version> [--status <status>]`. For a policy name such as `idea.idea_card`, pass `idea` to `--stage` and `idea_card` as `<role>`. Status is descriptive, defaults to `current`, and never means Gate approval. The command hashes but does not copy the file, so preserve approved versions at stable paths; never register `.research/state.json` or `.research/memory.md` as evidence.
+- Register every material canonical artifact before a downstream handoff with `researchctl artifact register <role> --stage <stage-id> --path <file> --artifact-id <id> --version <version> [--status <status>]`. For a policy name such as `idea.idea_card`, pass `idea` to `--stage` and `idea_card` as `<role>`. Status is descriptive, defaults to `current`, and never means Gate approval. The command hashes but does not copy the file, so preserve approved versions at stable paths; never register `.research/state.json`, `.research/state.lock`, or `.research/memory.md` as evidence.
 - Register material files directly, or retain large run/output collections through a registered registry or manifest containing stable IDs, paths, and checksums. `researchctl` verifies the registry or manifest file itself; the current stage must still verify the files it references.
 - Use `researchctl gate approve|reopen` for every Gate decision. Never edit Gate fields directly.
 - Run `researchctl doctor` to verify registered pointers and hashes before Gate approval. Gate approval separately refuses missing policy-required roles. A missing or changed historical approval file remains an audit warning; reopen the affected Gate and register the replacement at a new versioned path before reapproval.

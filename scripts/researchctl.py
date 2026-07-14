@@ -16,9 +16,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,8 +30,10 @@ DEFAULT_POLICY_PATH = PLUGIN_ROOT / "skills/research/references/policy.yaml"
 DEFAULT_MEMORY_TEMPLATE = PLUGIN_ROOT / "skills/research/assets/memory.template.md"
 RESEARCH_DIR = ".research"
 STATE_RELATIVE_PATH = Path(RESEARCH_DIR) / "state.json"
+LOCK_RELATIVE_PATH = Path(RESEARCH_DIR) / "state.lock"
 MEMORY_RELATIVE_PATH = Path(RESEARCH_DIR) / "memory.md"
 LEGACY_RELATIVE_PATH = Path(RESEARCH_DIR) / "project-state.yaml"
+LOCK_TIMEOUT_SECONDS = 60.0
 
 GATE_IDS = (
     "idea_freeze",
@@ -40,10 +44,12 @@ GATE_IDS = (
 GATE_STATUSES = {"pending", "approved", "reopened"}
 GATE_ACTIONS = {"approve", "reopen"}
 ARTIFACT_METADATA_FIELDS = ("artifact_id", "version", "content_hash", "status")
+ARTIFACT_POINTER_FIELDS = ("path", *ARTIFACT_METADATA_FIELDS)
+RESERVED_ARTIFACT_IDS = frozenset(ARTIFACT_POINTER_FIELDS)
 ARTIFACT_ROLE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-REQUIRED_STATE_FIELDS = {
+STATE_FIELD_ORDER = (
     "schema_version",
     "workflow_version",
     "enabled",
@@ -56,11 +62,16 @@ REQUIRED_STATE_FIELDS = {
     "stage_history",
     "created_at",
     "updated_at",
-}
+)
+REQUIRED_STATE_FIELDS = set(STATE_FIELD_ORDER)
 
 
 class ResearchCtlError(RuntimeError):
     """An expected, user-actionable command failure."""
+
+
+class TimestampExhaustionError(ResearchCtlError):
+    """The persisted chronology has no representable successor timestamp."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,54 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
     )
+
+
+def format_utc_timestamp(value: datetime) -> str:
+    """Serialize an aware UTC datetime without losing sub-second ordering."""
+
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def next_state_timestamp(state: dict[str, Any]) -> str:
+    """Return a UTC timestamp that cannot move behind recorded state history."""
+
+    now = parse_utc_timestamp(utc_now())
+    recorded = [
+        parse_utc_timestamp(state.get(field)) for field in ("created_at", "updated_at")
+    ]
+    checkpoint = state.get("last_checkpoint")
+    if isinstance(checkpoint, dict):
+        recorded.append(parse_utc_timestamp(checkpoint.get("timestamp")))
+    stage_history = state.get("stage_history")
+    if isinstance(stage_history, list):
+        recorded.extend(
+            parse_utc_timestamp(transition.get("timestamp"))
+            for transition in stage_history
+            if isinstance(transition, dict)
+        )
+    gates = state.get("gates")
+    if isinstance(gates, dict):
+        for record in gates.values():
+            history = record.get("history") if isinstance(record, dict) else None
+            if not isinstance(history, list):
+                continue
+            recorded.extend(
+                parse_utc_timestamp(decision.get("decided_at"))
+                for decision in history
+                if isinstance(decision, dict)
+            )
+    valid_recorded = [candidate for candidate in recorded if candidate is not None]
+    if valid_recorded:
+        try:
+            next_after_history = max(valid_recorded) + timedelta(microseconds=1)
+        except OverflowError as exc:
+            raise TimestampExhaustionError(
+                "state timestamps cannot advance beyond the supported datetime range"
+            ) from exc
+        chosen = max(candidate for candidate in (now, next_after_history) if candidate)
+        return format_utc_timestamp(chosen)
+    # utc_now() is valid by construction, so this fallback is defensive only.
+    return format_utc_timestamp(now) if now is not None else utc_now()
 
 
 def run_git(cwd: Path, *arguments: str) -> str | None:
@@ -182,9 +241,13 @@ def load_policy() -> Policy:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ResearchCtlError(f"policy file not found: {path}") from exc
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ResearchCtlError(f"cannot read policy file {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
+        if isinstance(exc, RecursionError):
+            raise ResearchCtlError(
+                f"policy JSON is nested too deeply to validate: {path}"
+            ) from exc
         raise ResearchCtlError(
             f"policy must be JSON-compatible YAML: {path}:{exc.lineno}:{exc.colno}: "
             f"{exc.msg}"
@@ -257,11 +320,24 @@ def load_policy() -> Policy:
     state_contract = raw.get("state_contract")
     if not isinstance(state_contract, dict):
         raise ResearchCtlError("policy state_contract must be an object")
+    contract_expectations = {
+        "required_fields": list(STATE_FIELD_ORDER),
+        "stage_ids": stage_order,
+        "gate_ids": list(GATE_IDS),
+        "gate_statuses": ["pending", "approved", "reopened"],
+        "gate_actions": ["approve", "reopen"],
+    }
+    for field, expected in contract_expectations.items():
+        if state_contract.get(field) != expected:
+            raise ResearchCtlError(
+                f"policy state_contract.{field} must be exactly: "
+                + ", ".join(expected)
+            )
     pointer_fields = state_contract.get("artifact_pointer_fields")
     expected_pointer_fields = ["path", *ARTIFACT_METADATA_FIELDS]
     if pointer_fields != expected_pointer_fields:
         raise ResearchCtlError(
-            "policy artifact_pointer_fields must be exactly: "
+            "policy state_contract.artifact_pointer_fields must be exactly: "
             + ", ".join(expected_pointer_fields)
         )
     normalized_specs: dict[str, dict[str, Any]] = {}
@@ -297,12 +373,71 @@ def load_policy() -> Policy:
     )
 
 
-def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
-    """Atomically replace a JSON file without exposing a partial state."""
+@contextmanager
+def state_mutation_lock(root: Path, *, create: bool) -> Iterable[None]:
+    """Serialize the complete state read-modify-write transaction across processes."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    state_path = root / STATE_RELATIVE_PATH
+    lock_path = root / LOCK_RELATIVE_PATH
+    if not create and not state_path.is_file():
+        raise ResearchCtlError(
+            f"research project is not initialized at {root}; run `researchctl init`"
+        )
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+    except OSError as exc:
+        raise ResearchCtlError(f"cannot open project state lock {lock_path}: {exc}") from exc
+
+    acquired = False
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    try:
+        while not acquired:
+            try:
+                if os.name == "nt":  # pragma: no cover - platform-specific branch
+                    import msvcrt
+
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (BlockingIOError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise ResearchCtlError(
+                        f"timed out waiting for project state lock {lock_path}"
+                    ) from exc
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":  # pragma: no cover - platform-specific branch
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
+
+
+def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    """Atomically and durably replace JSON without exposing a partial state."""
+
     temporary_name: str | None = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -318,11 +453,24 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             os.fsync(temporary.fileno())
         os.replace(temporary_name, path)
         temporary_name = None
+        if os.name != "nt":
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                # Atomic replacement already succeeded. Some filesystems do not
+                # support directory fsync, so durability hardening is best-effort.
+                pass
+    except OSError as exc:
+        raise ResearchCtlError(f"cannot atomically write {path}: {exc}") from exc
     finally:
         if temporary_name is not None:
             try:
                 Path(temporary_name).unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
 
 
@@ -334,9 +482,11 @@ def load_state(root: Path) -> dict[str, Any]:
         raise ResearchCtlError(
             f"research project is not initialized at {root}; run `researchctl init`"
         ) from exc
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ResearchCtlError(f"cannot read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
+        if isinstance(exc, RecursionError):
+            raise ResearchCtlError(f"state JSON is nested too deeply: {path}") from exc
         raise ResearchCtlError(
             f"invalid state JSON at {path}:{exc.lineno}:{exc.colno}: {exc.msg}"
         ) from exc
@@ -363,19 +513,24 @@ def require_compatible_state(state: dict[str, Any], policy: Policy) -> None:
 
 def default_memory(project_name: str) -> str:
     if DEFAULT_MEMORY_TEMPLATE.is_file():
-        template = DEFAULT_MEMORY_TEMPLATE.read_text(encoding="utf-8")
+        try:
+            template = DEFAULT_MEMORY_TEMPLATE.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ResearchCtlError(
+                f"cannot read memory template {DEFAULT_MEMORY_TEMPLATE}: {exc}"
+            ) from exc
         return template.replace("{{PROJECT_NAME}}", project_name)
     return (
-        f"# Research Memory: {project_name}\n\n"
-        "## Research Kernel\n\n"
-        "- Problem:\n"
-        "- Intended contribution:\n"
-        "- Scope and constraints:\n\n"
-        "## Verified Facts\n\n"
-        "## Decisions and Rationale\n\n"
-        "## Failed Attempts and Lessons\n\n"
-        "## Open Questions\n\n"
-        "## Next Checkpoint\n"
+        f"# 研究记忆：{project_name}\n\n"
+        "## 研究内核\n\n"
+        "- 研究问题：\n"
+        "- 当前假设或贡献：\n"
+        "- 范围与边界条件：\n\n"
+        "## 已验证事实\n\n"
+        "## 决策及理由\n\n"
+        "## 失败尝试与经验\n\n"
+        "## 开放问题\n\n"
+        "## 下一检查点\n"
     )
 
 
@@ -538,8 +693,9 @@ def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
     legacy_path = root / LEGACY_RELATIVE_PATH
     artifact_root = root / policy.artifact_root
     notes: list[str] = []
+    state_is_new = not state_path.exists()
 
-    if state_path.exists():
+    if not state_is_new:
         state = load_state(root)
         require_compatible_state(state, policy)
         print(f"state already exists; left unchanged: {state_path}")
@@ -548,17 +704,22 @@ def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
             state, notes = migrate_legacy_state(root, policy, legacy_path)
         else:
             state = new_state(root, policy)
-        atomic_write_json(state_path, state)
-        print(f"created {state_path}")
 
     if memory_path.exists():
+        if not memory_path.is_file():
+            raise ResearchCtlError(
+                f"project memory path exists but is not a regular file: {memory_path}"
+            )
         print(f"memory already exists; left unchanged: {memory_path}")
     else:
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.write_text(
-            default_memory(str(state.get("project_name") or root.name)),
-            encoding="utf-8",
-        )
+        try:
+            memory_path.parent.mkdir(parents=True, exist_ok=True)
+            memory_path.write_text(
+                default_memory(str(state.get("project_name") or root.name)),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise ResearchCtlError(f"cannot create project memory {memory_path}: {exc}") from exc
         print(f"created {memory_path}")
 
     artifact_root_existed = artifact_root.is_dir()
@@ -573,9 +734,18 @@ def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
 
     if ensure_local_git_exclude(root):
         print("added .research/ to this clone's Git info/exclude")
+    if state_is_new:
+        atomic_write_json(state_path, state)
+        print(f"created {state_path}")
     for note in notes:
         print(f"warning: {note}", file=sys.stderr)
-    print(f"research workflow enabled for {state['project_id']}")
+    if state.get("enabled") is True:
+        print(f"research workflow enabled for {state['project_id']}")
+    else:
+        print(
+            f"research workflow remains disabled for {state['project_id']}; "
+            "run `researchctl enable` to activate it"
+        )
     return 0
 
 
@@ -608,8 +778,19 @@ def cmd_status(root: Path, _policy: Policy, args: argparse.Namespace) -> int:
     return 0
 
 
-def write_mutated_state(root: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = utc_now()
+def write_mutated_state(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    allow_timestamp_exhaustion: bool = False,
+) -> None:
+    try:
+        state["updated_at"] = next_state_timestamp(state)
+    except TimestampExhaustionError:
+        if not allow_timestamp_exhaustion:
+            raise
+        # Disabling is an emergency fail-safe. At datetime.max there is no
+        # representable successor, so preserve the existing valid timestamp.
     atomic_write_json(root / STATE_RELATIVE_PATH, state)
 
 
@@ -622,11 +803,21 @@ def cmd_toggle(
     # mismatch. Re-enabling still requires a compatible state.
     if enabled:
         require_compatible_state(state, policy)
+        errors, _warnings = validate_state(root, state, policy)
+        if errors:
+            preview = "; ".join(errors[:3])
+            raise ResearchCtlError(
+                f"state is invalid and cannot be enabled; run `researchctl doctor`: {preview}"
+            )
     if state.get("enabled") is enabled:
         print(f"research workflow already {'enabled' if enabled else 'disabled'}")
         return 0
     state["enabled"] = enabled
-    write_mutated_state(root, state)
+    write_mutated_state(
+        root,
+        state,
+        allow_timestamp_exhaustion=not enabled,
+    )
     print(f"research workflow {'enabled' if enabled else 'disabled'}")
     return 0
 
@@ -641,12 +832,12 @@ def command_actor() -> str:
 
 
 def resolve_artifact_path(root: Path, value: str) -> Path:
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
     try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
         return candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ResearchCtlError(f"artifact file cannot be resolved: {value}: {exc}") from exc
 
 
@@ -662,11 +853,31 @@ def stored_artifact_path(root: Path, path: Path) -> tuple[str, bool]:
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     try:
+        before = path.stat()
         with path.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(block)
+        after = path.stat()
     except OSError as exc:
         raise ResearchCtlError(f"cannot hash artifact file {path}: {exc}") from exc
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if identity_before != identity_after:
+        raise ResearchCtlError(
+            f"artifact file changed while it was being hashed: {path}; retry with a stable file"
+        )
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -675,10 +886,19 @@ def is_research_control_file(root: Path, path: Path) -> bool:
 
     control_files = (
         root / STATE_RELATIVE_PATH,
+        root / LOCK_RELATIVE_PATH,
         root / MEMORY_RELATIVE_PATH,
         root / LEGACY_RELATIVE_PATH,
     )
-    return any(path == candidate.resolve() for candidate in control_files)
+    for candidate in control_files:
+        try:
+            if path == candidate.resolve(strict=False):
+                return True
+            if path.exists() and candidate.exists() and path.samefile(candidate):
+                return True
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return False
 
 
 def artifact_pointer_errors(
@@ -719,10 +939,14 @@ def artifact_pointer_errors(
     if errors:
         return errors
     assert isinstance(path_value, str)
-    unresolved_path = Path(path_value).expanduser()
-    if not unresolved_path.is_absolute():
-        unresolved_path = root / unresolved_path
-    if is_research_control_file(root, unresolved_path.resolve(strict=False)):
+    try:
+        unresolved_path = Path(path_value).expanduser()
+        if not unresolved_path.is_absolute():
+            unresolved_path = root / unresolved_path
+        resolved_for_control_check = unresolved_path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [f"{label}.path cannot be resolved: {exc}"]
+    if is_research_control_file(root, resolved_for_control_check):
         return [
             f"{label} points to research control metadata, which cannot be evidence: "
             f"{path_value}"
@@ -761,6 +985,47 @@ def iter_gate_artifact_refs(state: dict[str, Any]) -> Iterable[tuple[str, dict[s
                         f"Gate {gate} history[{index}].artifact_refs[{ref_index}]",
                         reference,
                     )
+
+
+def is_direct_artifact_pointer(value: Any) -> bool:
+    """Recognize the pre-registry pointer shape without inspecting mapping labels."""
+
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("path"), str)
+        and any(field in value for field in ARTIFACT_METADATA_FIELDS)
+    )
+
+
+def iter_current_artifact_pointers(
+    state: dict[str, Any], policy: Policy
+) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Yield only canonical artifacts[stage][role][artifact_id] pointers."""
+
+    artifacts = state.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    for stage in policy.stage_order:
+        stage_bucket = artifacts.get(stage)
+        if not isinstance(stage_bucket, dict):
+            continue
+        for role, role_bucket in stage_bucket.items():
+            if (
+                not isinstance(role, str)
+                or not ARTIFACT_ROLE_RE.fullmatch(role)
+                or not isinstance(role_bucket, dict)
+                or is_direct_artifact_pointer(role_bucket)
+            ):
+                continue
+            for artifact_id, pointer in role_bucket.items():
+                if isinstance(artifact_id, str) and isinstance(pointer, dict):
+                    yield f"artifacts.{stage}.{role}.{artifact_id}", pointer
+
+
+def artifact_identity_payload(pointer: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable fields bound by an artifact ID and version."""
+
+    return {field: pointer.get(field) for field in ARTIFACT_POINTER_FIELDS}
 
 
 def role_is_bound_by_approved_gate(
@@ -829,7 +1094,7 @@ def prepare_artifact_bucket(
     if raw_stage is None:
         stage_bucket: dict[str, Any] = {}
         artifacts[stage] = stage_bucket
-    elif isinstance(raw_stage, dict) and "path" not in raw_stage:
+    elif isinstance(raw_stage, dict) and not is_direct_artifact_pointer(raw_stage):
         stage_bucket = raw_stage
     else:
         stash_legacy_artifact(artifacts, stage, raw_stage)
@@ -841,7 +1106,7 @@ def prepare_artifact_bucket(
     if raw_role is None:
         role_bucket: dict[str, Any] = {}
         stage_bucket[role] = role_bucket
-    elif isinstance(raw_role, dict) and "path" in raw_role:
+    elif is_direct_artifact_pointer(raw_role):
         legacy_id = raw_role.get("artifact_id")
         if (
             isinstance(legacy_id, str)
@@ -883,6 +1148,10 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
     artifact_id = args.artifact_id.strip()
     if not ARTIFACT_ID_RE.fullmatch(artifact_id):
         raise ResearchCtlError("artifact ID contains unsupported characters")
+    if artifact_id in RESERVED_ARTIFACT_IDS:
+        raise ResearchCtlError(
+            f"artifact ID {artifact_id!r} is reserved by the artifact pointer structure"
+        )
     version = args.version.strip()
     status = args.status.strip()
     if not version or not status:
@@ -937,9 +1206,23 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
             "use a new version"
         )
 
-    for history_label, reference in iter_gate_artifact_refs(state):
+    identity_sources = (
+        *iter_current_artifact_pointers(state, policy),
+        *iter_gate_artifact_refs(state),
+    )
+    for history_label, reference in identity_sources:
         old_path = reference.get("path")
         old_hash = reference.get("content_hash")
+        if (
+            reference.get("artifact_id") == artifact_id
+            and str(reference.get("version")) == version
+        ):
+            historical_pointer = artifact_identity_payload(reference)
+            if historical_pointer != pointer:
+                raise ResearchCtlError(
+                    f"artifact identity {artifact_id}@{version} was already bound to "
+                    f"different metadata in {history_label}; use a new version"
+                )
         if not isinstance(old_path, str) or not isinstance(old_hash, str):
             continue
         try:
@@ -1001,6 +1284,8 @@ def gate_artifact_refs(
     policy: Policy,
     gate: str,
     release_target: str | None,
+    *,
+    verify_integrity: bool = True,
 ) -> list[dict[str, Any]]:
     artifacts = state.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -1013,14 +1298,18 @@ def gate_artifact_refs(
         stage, role = split_artifact_role(role_reference, policy.stage_order)
         stage_bucket = artifacts.get(stage)
         role_bucket = stage_bucket.get(role) if isinstance(stage_bucket, dict) else None
-        if not isinstance(role_bucket, dict) or not role_bucket or "path" in role_bucket:
+        if (
+            not isinstance(role_bucket, dict)
+            or not role_bucket
+            or is_direct_artifact_pointer(role_bucket)
+        ):
             failures.append(f"missing required artifact role {role_reference}")
             continue
         role_references: list[dict[str, Any]] = []
         for key, pointer in sorted(role_bucket.items()):
             label = f"artifacts.{stage}.{role}.{key}"
             pointer_errors = artifact_pointer_errors(
-                root, pointer, label, verify_integrity=True
+                root, pointer, label, verify_integrity=verify_integrity
             )
             if pointer_errors:
                 failures.extend(pointer_errors)
@@ -1056,6 +1345,11 @@ def cmd_gate(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         state,
         policy,
         verify_artifact_integrity=args.action == "approve",
+        # Reopening must remain a recovery path when any currently approved Gate
+        # has stale bindings. Reverse-order Gate rules still prevent unsafe skips.
+        allow_binding_drift_for=(
+            frozenset(GATE_IDS) if args.action == "reopen" else frozenset()
+        ),
     )
     if state_errors:
         preview = "; ".join(state_errors[:3])
@@ -1120,7 +1414,7 @@ def cmd_gate(root: Path, policy: Policy, args: argparse.Namespace) -> int:
                 )
         new_status = "reopened"
 
-    timestamp = utc_now()
+    timestamp = next_state_timestamp(state)
     identifier = decision_id()
     release_target: str | None = None
     if args.gate == "release":
@@ -1188,7 +1482,16 @@ def cmd_gate(root: Path, policy: Policy, args: argparse.Namespace) -> int:
             )
     else:
         reopen_target = policy.gate_specs[args.gate].get("reopen_to")
-        if args.gate != "release" and reopen_target != state.get("current_stage"):
+        current_stage = state.get("current_stage")
+        if current_stage not in policy.stage_order:
+            raise ResearchCtlError(f"state has unknown current_stage: {current_stage!r}")
+        should_move_back = (
+            args.gate != "release"
+            and reopen_target in policy.stage_order
+            and policy.stage_order.index(current_stage)
+            > policy.stage_order.index(reopen_target)
+        )
+        if should_move_back:
             record_stage_transition(
                 state,
                 to_stage=reopen_target,
@@ -1235,44 +1538,60 @@ def cmd_checkpoint(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         raise ResearchCtlError("checkpoint requires a non-empty --summary")
     state = load_state(root)
     require_compatible_state(state, policy)
-    timestamp = utc_now()
+    state_errors, _state_warnings = validate_state(
+        root, state, policy, verify_artifact_integrity=False
+    )
+    if state_errors:
+        preview = "; ".join(state_errors[:3])
+        raise ResearchCtlError(
+            f"state is invalid; run `researchctl doctor`: {preview}"
+        )
+    timestamp = next_state_timestamp(state)
     if args.stage is not None:
         current_stage = state.get("current_stage")
         if current_stage not in policy.stage_order:
             raise ResearchCtlError(f"state has unknown current_stage: {current_stage!r}")
         if args.stage not in policy.stage_order:
             raise ResearchCtlError(f"unknown target stage: {args.stage!r}")
-        requirements = transition_requirements(policy, current_stage, args.stage)
-        gates = state.get("gates")
-        if not isinstance(gates, dict):
-            raise ResearchCtlError("state gates must be an object")
-        for gate in requirements:
-            record = gates.get(gate)
-            if not isinstance(record, dict) or record.get("status") != "approved":
-                raise ResearchCtlError(
-                    f"stage transition {current_stage}->{args.stage} requires "
-                    f"approved Gate {gate}"
-                )
-        record_stage_transition(
-            state,
-            to_stage=args.stage,
-            trigger="checkpoint",
-            timestamp=timestamp,
-        )
+        if args.stage != current_stage:
+            requirements = transition_requirements(policy, current_stage, args.stage)
+            gates = state.get("gates")
+            if not isinstance(gates, dict):
+                raise ResearchCtlError("state gates must be an object")
+            for gate in requirements:
+                record = gates.get(gate)
+                if not isinstance(record, dict) or record.get("status") != "approved":
+                    raise ResearchCtlError(
+                        f"stage transition {current_stage}->{args.stage} requires "
+                        f"approved Gate {gate}"
+                    )
+            record_stage_transition(
+                state,
+                to_stage=args.stage,
+                trigger="checkpoint",
+                timestamp=timestamp,
+            )
     state["last_checkpoint"] = {"summary": summary, "timestamp": timestamp}
     write_mutated_state(root, state)
     print("checkpoint recorded")
     return 0
 
 
-def valid_timestamp(value: Any) -> bool:
+def parse_utc_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
-        return False
+        return None
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return True
+        parsed = datetime.fromisoformat(normalized)
+    except (ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        return None
+    return parsed
+
+
+def valid_timestamp(value: Any) -> bool:
+    return parse_utc_timestamp(value) is not None
 
 
 def latest_approved_artifact_refs(history: list[Any]) -> list[dict[str, Any]]:
@@ -1288,111 +1607,265 @@ def latest_approved_artifact_refs(history: list[Any]) -> list[dict[str, Any]]:
     return []
 
 
-def validate_artifact_tree(
+def validate_legacy_artifact_tree(
     root: Path,
     value: Any,
     label: str,
+    warnings: list[str],
+    *,
+    verify_integrity: bool,
+) -> None:
+    """Inspect legacy containers iteratively; they remain readable but non-canonical."""
+
+    stack: list[tuple[Any, str]] = [(value, label)]
+    while stack:
+        current, current_label = stack.pop()
+        if current is None:
+            continue
+        if isinstance(current, str):
+            if not current.strip():
+                warnings.append(
+                    f"legacy artifact pointer: {current_label} is an empty artifact path"
+                )
+                continue
+            try:
+                candidate = Path(current).expanduser()
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                exists = candidate.exists()
+            except (OSError, RuntimeError, ValueError) as exc:
+                warnings.append(
+                    f"artifact pointer cannot be resolved: {current_label} -> {exc}"
+                )
+                continue
+            if not exists:
+                warnings.append(
+                    f"artifact pointer does not exist: {current_label} -> {current}"
+                )
+            continue
+        if isinstance(current, list):
+            stack.extend(
+                (child, f"{current_label}[{index}]")
+                for index, child in reversed(list(enumerate(current)))
+            )
+            continue
+        if not isinstance(current, dict):
+            warnings.append(
+                f"legacy artifact pointer: {current_label} is not a valid artifact path"
+            )
+            continue
+        if is_direct_artifact_pointer(current):
+            pointer_errors = artifact_pointer_errors(
+                root,
+                current,
+                current_label,
+                verify_integrity=verify_integrity,
+            )
+            warnings.extend(
+                f"legacy artifact pointer: {error}" for error in pointer_errors
+            )
+            continue
+        if any(field in current for field in ARTIFACT_METADATA_FIELDS):
+            warnings.append(
+                f"legacy artifact pointer: {current_label} is not a valid artifact path"
+            )
+            continue
+        stack.extend(
+            (child, f"{current_label}.{key}")
+            for key, child in reversed(list(current.items()))
+        )
+
+
+def validate_artifact_registry(
+    root: Path,
+    artifacts: dict[str, Any] | list[Any],
     policy: Policy,
     errors: list[str],
     warnings: list[str],
     *,
     verify_integrity: bool,
 ) -> None:
-    """Validate new canonical pointers strictly while retaining legacy readability."""
+    """Validate the fixed artifacts[stage][role][artifact_id] registry shape."""
 
-    if value is None:
-        return
-    if isinstance(value, str):
-        if not value.strip():
-            parts = label.split(".")
-            canonical = (
-                len(parts) >= 4
-                and parts[0] == "artifacts"
-                and parts[1] in policy.stage_order
-            )
-            message = f"{label} is an empty artifact path"
-            (errors if canonical else warnings).append(
-                message if canonical else f"legacy artifact pointer: {message}"
-            )
-            return
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        if not candidate.exists():
-            warnings.append(f"artifact pointer does not exist: {label} -> {value}")
-        return
-    if isinstance(value, list):
-        for index, child in enumerate(value):
-            validate_artifact_tree(
-                root,
-                child,
-                f"{label}[{index}]",
-                policy,
-                errors,
-                warnings,
-                verify_integrity=verify_integrity,
-            )
-        return
-    if not isinstance(value, dict):
-        parts = label.split(".")
-        canonical = (
-            len(parts) >= 4
-            and parts[0] == "artifacts"
-            and parts[1] in policy.stage_order
-        )
-        message = f"{label} is not a valid artifact path"
-        (errors if canonical else warnings).append(
-            message if canonical else f"legacy artifact pointer: {message}"
-        )
-        return
-    if "path" in value:
-        parts = label.split(".")
-        canonical = (
-            len(parts) >= 4
-            and parts[0] == "artifacts"
-            and parts[1] in policy.stage_order
-        )
-        pointer_errors = artifact_pointer_errors(
-            root, value, label, verify_integrity=verify_integrity
-        )
-        if canonical:
-            errors.extend(pointer_errors)
-        elif pointer_errors:
-            warnings.extend(
-                f"legacy artifact pointer: {error}" for error in pointer_errors
-            )
-            path_value = value.get("path")
-            if isinstance(path_value, str) and path_value.strip():
-                candidate = Path(path_value).expanduser()
-                if not candidate.is_absolute():
-                    candidate = root / candidate
-                if not candidate.exists():
-                    warnings.append(
-                        f"artifact pointer does not exist: {label} -> {path_value}"
-                    )
-        return
-    if any(field in value for field in ARTIFACT_METADATA_FIELDS):
-        parts = label.split(".")
-        canonical = (
-            len(parts) >= 4
-            and parts[0] == "artifacts"
-            and parts[1] in policy.stage_order
-        )
-        message = f"{label} is not a valid artifact path"
-        (errors if canonical else warnings).append(
-            message if canonical else f"legacy artifact pointer: {message}"
-        )
-        return
-    for key, child in value.items():
-        validate_artifact_tree(
+    if isinstance(artifacts, list):
+        validate_legacy_artifact_tree(
             root,
-            child,
-            f"{label}.{key}",
-            policy,
-            errors,
+            artifacts,
+            "artifacts",
             warnings,
             verify_integrity=verify_integrity,
         )
+        return
+    for stage, stage_bucket in artifacts.items():
+        stage_label = f"artifacts.{stage}"
+        if stage not in policy.stage_order:
+            validate_legacy_artifact_tree(
+                root,
+                stage_bucket,
+                stage_label,
+                warnings,
+                verify_integrity=verify_integrity,
+            )
+            continue
+        if not isinstance(stage_bucket, dict) or is_direct_artifact_pointer(stage_bucket):
+            errors.append(f"{stage_label} must be a role mapping")
+            continue
+        for role, role_bucket in stage_bucket.items():
+            role_label = f"{stage_label}.{role}"
+            if not ARTIFACT_ROLE_RE.fullmatch(role):
+                errors.append(f"{role_label} role must use lower_snake_case")
+                continue
+            if not isinstance(role_bucket, dict):
+                errors.append(f"{role_label} must be an artifact-ID mapping")
+                continue
+            if is_direct_artifact_pointer(role_bucket):
+                pointer_errors = artifact_pointer_errors(
+                    root,
+                    role_bucket,
+                    role_label,
+                    verify_integrity=verify_integrity,
+                )
+                errors.extend(pointer_errors)
+                warnings.append(
+                    f"legacy artifact pointer: {role_label} should be re-registered "
+                    "under an artifact-ID mapping"
+                )
+                continue
+            for artifact_id, pointer in role_bucket.items():
+                pointer_label = f"{role_label}.{artifact_id}"
+                if (
+                    not ARTIFACT_ID_RE.fullmatch(artifact_id)
+                    or artifact_id in RESERVED_ARTIFACT_IDS
+                ):
+                    errors.append(
+                        f"{pointer_label} has an invalid or reserved artifact-ID mapping key"
+                    )
+                pointer_errors = artifact_pointer_errors(
+                    root,
+                    pointer,
+                    pointer_label,
+                    verify_integrity=verify_integrity,
+                )
+                if isinstance(pointer, dict):
+                    extra = set(pointer) - set(ARTIFACT_POINTER_FIELDS)
+                    if extra:
+                        pointer_errors.append(
+                            f"{pointer_label} has unknown fields: {', '.join(sorted(extra))}"
+                        )
+                    if pointer.get("artifact_id") != artifact_id:
+                        pointer_errors.append(
+                            f"{pointer_label}.artifact_id must match its artifact-ID mapping key"
+                        )
+                errors.extend(pointer_errors)
+
+
+def validate_artifact_identities(
+    state: dict[str, Any],
+    policy: Policy,
+    errors: list[str],
+    warnings: list[str],
+    *,
+    allow_binding_drift_for: frozenset[str],
+) -> None:
+    """Reject immutable identity conflicts while preserving a Gate recovery path."""
+
+    current: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    historical: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+
+    def add(
+        destination: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]],
+        label: str,
+        pointer: dict[str, Any],
+    ) -> None:
+        artifact_id = pointer.get("artifact_id")
+        version = pointer.get("version")
+        if (
+            not isinstance(artifact_id, str)
+            or not ARTIFACT_ID_RE.fullmatch(artifact_id)
+            or isinstance(version, bool)
+            or not isinstance(version, (str, int))
+            or not str(version).strip()
+        ):
+            return
+        identity = (artifact_id, str(version))
+        destination.setdefault(identity, []).append(
+            (label, artifact_identity_payload(pointer))
+        )
+
+    for label, pointer in iter_current_artifact_pointers(state, policy):
+        add(current, label, pointer)
+    for label, pointer in iter_gate_artifact_refs(state):
+        add(historical, label, pointer)
+
+    def unique_payloads(
+        bindings: list[tuple[str, dict[str, Any]]],
+    ) -> dict[str, tuple[str, dict[str, Any]]]:
+        return {
+            json.dumps(payload, ensure_ascii=False, sort_keys=True): (label, payload)
+            for label, payload in bindings
+        }
+
+    for source_name, collection in (("current registry", current), ("Gate history", historical)):
+        for (artifact_id, version), bindings in collection.items():
+            payloads = unique_payloads(bindings)
+            if len(payloads) > 1:
+                labels = [label for label, _payload in payloads.values()]
+                errors.append(
+                    f"artifact identity {artifact_id}@{version} has different metadata "
+                    f"within {source_name}: {', '.join(labels)}"
+                )
+
+    active_gates_by_identity: dict[tuple[str, str], set[str]] = {}
+    gates = state.get("gates")
+    if isinstance(gates, dict):
+        for gate, record in gates.items():
+            history = record.get("history") if isinstance(record, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("status") != "approved"
+                or not isinstance(history, list)
+            ):
+                continue
+            approval = next(
+                (
+                    decision
+                    for decision in reversed(history)
+                    if isinstance(decision, dict) and decision.get("action") == "approve"
+                ),
+                None,
+            )
+            refs = approval.get("artifact_refs") if isinstance(approval, dict) else None
+            if not isinstance(refs, list):
+                continue
+            for reference in refs:
+                if not isinstance(reference, dict):
+                    continue
+                artifact_id = reference.get("artifact_id")
+                version = reference.get("version")
+                if isinstance(artifact_id, str) and isinstance(version, (str, int)):
+                    active_gates_by_identity.setdefault(
+                        (artifact_id, str(version)), set()
+                    ).add(str(gate))
+
+    for identity in current.keys() & historical.keys():
+        current_payloads = unique_payloads(current[identity])
+        historical_payloads = unique_payloads(historical[identity])
+        if set(current_payloads) == set(historical_payloads):
+            continue
+        artifact_id, version = identity
+        active_gates = active_gates_by_identity.get(identity, set())
+        message = (
+            f"artifact identity {artifact_id}@{version} differs between the current "
+            "registry and Gate history"
+        )
+        if active_gates and not active_gates.issubset(allow_binding_drift_for):
+            errors.append(
+                f"{message}; reopen Gate(s) {', '.join(sorted(active_gates))} before recovery"
+            )
+        else:
+            warnings.append(
+                f"{message}; register a new version to complete recovery"
+            )
 
 
 def validate_state(
@@ -1401,6 +1874,7 @@ def validate_state(
     policy: Policy,
     *,
     verify_artifact_integrity: bool = True,
+    allow_binding_drift_for: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -1426,8 +1900,13 @@ def validate_state(
         errors.append(f"unknown current_stage: {state.get('current_stage')!r}")
     for field in ("created_at", "updated_at"):
         if not valid_timestamp(state.get(field)):
-            errors.append(f"{field} must be an ISO-8601 timestamp")
+            errors.append(f"{field} must be a timezone-explicit UTC timestamp")
+    created_at = parse_utc_timestamp(state.get("created_at"))
+    updated_at = parse_utc_timestamp(state.get("updated_at"))
+    if created_at is not None and updated_at is not None and updated_at < created_at:
+        errors.append("updated_at must not be earlier than created_at")
 
+    gate_decisions_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
     gates = state.get("gates")
     if not isinstance(gates, dict):
         errors.append("gates must be an object")
@@ -1438,6 +1917,7 @@ def validate_state(
             errors.append("missing Gates: " + ", ".join(sorted(missing_gates)))
         if extra_gates:
             errors.append("unknown Gates: " + ", ".join(sorted(extra_gates)))
+        all_decision_ids: set[str] = set()
         for gate in GATE_IDS:
             record = gates.get(gate)
             if not isinstance(record, dict):
@@ -1446,7 +1926,7 @@ def validate_state(
             status = record.get("status")
             history = record.get("history")
             latest = record.get("latest_decision_id")
-            if status not in GATE_STATUSES:
+            if not isinstance(status, str) or status not in GATE_STATUSES:
                 errors.append(f"Gate {gate} has invalid status {status!r}")
             if not isinstance(history, list):
                 errors.append(f"Gate {gate} history must be a list")
@@ -1459,7 +1939,9 @@ def validate_state(
                 if status != "pending":
                     errors.append(f"Gate {gate} without history must be pending")
                 continue
-            seen_ids: set[str] = set()
+            expected_previous_status = "pending"
+            previous_decided_at: datetime | None = None
+            latest_approved_refs: list[Any] | None = None
             for index, decision in enumerate(history):
                 prefix = f"Gate {gate} history[{index}]"
                 if not isinstance(decision, dict):
@@ -1484,16 +1966,41 @@ def validate_state(
                 identifier = decision.get("decision_id")
                 if not isinstance(identifier, str) or not identifier:
                     errors.append(f"{prefix} decision_id must be non-empty")
-                elif identifier in seen_ids:
-                    errors.append(f"{prefix} duplicates decision_id {identifier}")
+                elif identifier in all_decision_ids:
+                    errors.append(
+                        f"{prefix} duplicates decision_id {identifier} across Gate history"
+                    )
                 else:
-                    seen_ids.add(identifier)
-                if decision.get("action") not in GATE_ACTIONS:
+                    all_decision_ids.add(identifier)
+                    gate_decisions_by_id[identifier] = (gate, decision)
+                action = decision.get("action")
+                previous_status = decision.get("previous_status")
+                new_status = decision.get("new_status")
+                if not isinstance(action, str) or action not in GATE_ACTIONS:
                     errors.append(f"{prefix} has invalid action")
-                if decision.get("previous_status") not in GATE_STATUSES:
+                if not isinstance(previous_status, str) or previous_status not in GATE_STATUSES:
                     errors.append(f"{prefix} has invalid previous_status")
-                if decision.get("new_status") not in GATE_STATUSES:
+                elif previous_status != expected_previous_status:
+                    errors.append(
+                        f"{prefix} previous_status {previous_status!r} does not continue "
+                        f"the Gate history from {expected_previous_status!r}"
+                    )
+                if not isinstance(new_status, str) or new_status not in GATE_STATUSES:
                     errors.append(f"{prefix} has invalid new_status")
+                if action == "approve" and (
+                    previous_status == "approved" or new_status != "approved"
+                ):
+                    errors.append(
+                        f"{prefix} approve must transition pending/reopened -> approved"
+                    )
+                if action == "reopen" and (
+                    previous_status != "approved" or new_status != "reopened"
+                ):
+                    errors.append(
+                        f"{prefix} reopen must transition approved -> reopened"
+                    )
+                if isinstance(new_status, str) and new_status in GATE_STATUSES:
+                    expected_previous_status = new_status
                 if not isinstance(decision.get("reason"), str) or not decision[
                     "reason"
                 ].strip():
@@ -1502,16 +2009,102 @@ def validate_state(
                     "actor"
                 ].strip():
                     errors.append(f"{prefix} actor must be non-empty")
-                if not valid_timestamp(decision.get("decided_at")):
-                    errors.append(f"{prefix} decided_at must be an ISO timestamp")
-                if not isinstance(decision.get("artifact_refs"), list):
+                decided_at = parse_utc_timestamp(decision.get("decided_at"))
+                if decided_at is None:
+                    errors.append(
+                        f"{prefix} decided_at must be a timezone-explicit UTC timestamp"
+                    )
+                elif previous_decided_at is not None and decided_at < previous_decided_at:
+                    errors.append(f"{prefix} decided_at is earlier than the prior decision")
+                else:
+                    previous_decided_at = decided_at
+                artifact_refs = decision.get("artifact_refs")
+                if not isinstance(artifact_refs, list):
                     errors.append(f"{prefix} artifact_refs must be a list")
-                if gate == "release" and decision.get("action") == "approve":
+                else:
+                    seen_ref_labels: set[str] = set()
+                    seen_ref_roles: set[str] = set()
+                    for ref_index, reference in enumerate(artifact_refs):
+                        ref_prefix = f"{prefix}.artifact_refs[{ref_index}]"
+                        if not isinstance(reference, dict):
+                            errors.append(f"{ref_prefix} must be an artifact pointer")
+                            continue
+                        label = reference.get("label")
+                        if not isinstance(label, str) or not label.strip():
+                            errors.append(f"{ref_prefix}.label must be non-empty")
+                        elif label in seen_ref_labels:
+                            errors.append(f"{ref_prefix} duplicates label {label}")
+                        else:
+                            seen_ref_labels.add(label)
+                            label_match = re.fullmatch(
+                                r"artifacts\.([^.]+)\.([^.]+)\.(.+)", label
+                            )
+                            if label_match is None:
+                                errors.append(
+                                    f"{ref_prefix}.label must use "
+                                    "artifacts.<stage>.<role>.<artifact_id>"
+                                )
+                            else:
+                                ref_role = (
+                                    f"{label_match.group(1)}.{label_match.group(2)}"
+                                )
+                                seen_ref_roles.add(ref_role)
+                                if reference.get("artifact_id") != label_match.group(3):
+                                    errors.append(
+                                        f"{ref_prefix}.artifact_id must match its label"
+                                    )
+                        errors.extend(
+                            artifact_pointer_errors(
+                                root,
+                                reference,
+                                ref_prefix,
+                                verify_integrity=False,
+                            )
+                        )
+                    if action == "approve":
+                        latest_approved_refs = artifact_refs
+                        if artifact_refs:
+                            try:
+                                expected_ref_roles = set(
+                                    required_artifact_roles_for_gate(
+                                        policy,
+                                        gate,
+                                        decision.get("release_target")
+                                        if gate == "release"
+                                        else None,
+                                    )
+                                )
+                            except ResearchCtlError as exc:
+                                errors.append(f"{prefix}: {exc}")
+                            else:
+                                unexpected = seen_ref_roles - expected_ref_roles
+                                missing_roles = expected_ref_roles - seen_ref_roles
+                                if unexpected:
+                                    errors.append(
+                                        f"{prefix} has artifact_refs from unexpected roles: "
+                                        f"{', '.join(sorted(unexpected))}"
+                                    )
+                                if missing_roles:
+                                    errors.append(
+                                        f"{prefix} artifact_refs are missing required roles: "
+                                        f"{', '.join(sorted(missing_roles))}"
+                                    )
+                    elif (
+                        action == "reopen"
+                        and latest_approved_refs is not None
+                        and artifact_refs != latest_approved_refs
+                    ):
+                        errors.append(
+                            f"{prefix} reopen artifact_refs must match the latest approval"
+                        )
+                if gate == "release":
                     allowed_targets = policy.gate_specs["release"].get(
                         "release_targets", []
                     )
                     if decision.get("release_target") not in allowed_targets:
                         errors.append(f"{prefix} has invalid or missing release_target")
+                elif "release_target" in decision:
+                    errors.append(f"{prefix} must not define release_target")
             last = history[-1] if isinstance(history[-1], dict) else {}
             if latest != last.get("decision_id"):
                 errors.append(
@@ -1519,6 +2112,87 @@ def validate_state(
                 )
             if status != last.get("new_status"):
                 errors.append(f"Gate {gate} status does not match its last decision")
+
+        for gate_index, gate in enumerate(policy.gate_order):
+            record = gates.get(gate)
+            if not isinstance(record, dict) or record.get("status") != "approved":
+                continue
+            prerequisites = tuple(
+                dict.fromkeys(
+                    (
+                        *policy.gate_order[:gate_index],
+                        *required_gates(policy.gate_specs[gate]),
+                    )
+                )
+            )
+            for prerequisite in prerequisites:
+                prerequisite_record = gates.get(prerequisite)
+                if (
+                    not isinstance(prerequisite_record, dict)
+                    or prerequisite_record.get("status") != "approved"
+                ):
+                    errors.append(
+                        f"approved Gate {gate} requires approved Gate {prerequisite}"
+                    )
+
+        # Current status alone cannot prove that a forged or later-reopened
+        # downstream approval was legal when it was recorded. Validate each
+        # approval against prerequisite approval history at that point in time.
+        for gate_index, gate in enumerate(policy.gate_order):
+            record = gates.get(gate)
+            history = record.get("history") if isinstance(record, dict) else None
+            if not isinstance(history, list):
+                continue
+            prerequisites = tuple(
+                dict.fromkeys(
+                    (
+                        *policy.gate_order[:gate_index],
+                        *required_gates(policy.gate_specs[gate]),
+                    )
+                )
+            )
+            for decision_index, decision in enumerate(history):
+                if not isinstance(decision, dict) or decision.get("action") != "approve":
+                    continue
+                approved_at = parse_utc_timestamp(decision.get("decided_at"))
+                if approved_at is None:
+                    continue
+                for prerequisite in prerequisites:
+                    prerequisite_record = gates.get(prerequisite)
+                    prerequisite_history = (
+                        prerequisite_record.get("history")
+                        if isinstance(prerequisite_record, dict)
+                        else None
+                    )
+                    strict_prior: list[dict[str, Any]] = []
+                    same_time_approval = False
+                    if isinstance(prerequisite_history, list):
+                        for candidate in prerequisite_history:
+                            if not isinstance(candidate, dict):
+                                continue
+                            candidate_at = parse_utc_timestamp(
+                                candidate.get("decided_at")
+                            )
+                            if candidate_at is None:
+                                continue
+                            if candidate_at < approved_at:
+                                strict_prior.append(candidate)
+                            elif (
+                                candidate_at == approved_at
+                                and candidate.get("action") == "approve"
+                            ):
+                                # Older second-resolution records cannot establish a
+                                # cross-Gate order, so an equal-time approval is accepted.
+                                same_time_approval = True
+                    prerequisite_was_approved = (
+                        bool(strict_prior)
+                        and strict_prior[-1].get("new_status") == "approved"
+                    ) or same_time_approval
+                    if not prerequisite_was_approved:
+                        errors.append(
+                            f"Gate {gate} history[{decision_index}] approval lacks a prior "
+                            f"approval of prerequisite Gate {prerequisite}"
+                        )
 
         current_stage = state.get("current_stage")
         if current_stage in policy.stage_order:
@@ -1554,15 +2228,84 @@ def validate_state(
     if not isinstance(artifacts, (dict, list)):
         errors.append("artifacts must be an object or list")
     else:
-        validate_artifact_tree(
+        validate_artifact_registry(
             root,
             artifacts,
-            "artifacts",
             policy,
             errors,
             warnings,
             verify_integrity=verify_artifact_integrity,
         )
+        validate_artifact_identities(
+            state,
+            policy,
+            errors,
+            warnings,
+            allow_binding_drift_for=allow_binding_drift_for,
+        )
+
+    if isinstance(gates, dict):
+        for gate in policy.gate_order:
+            record = gates.get(gate)
+            history = record.get("history") if isinstance(record, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("status") != "approved"
+                or not isinstance(history, list)
+            ):
+                continue
+            approval = next(
+                (
+                    decision
+                    for decision in reversed(history)
+                    if isinstance(decision, dict)
+                    and decision.get("action") == "approve"
+                ),
+                None,
+            )
+            approved_refs = (
+                approval.get("artifact_refs") if isinstance(approval, dict) else None
+            )
+            if not isinstance(approved_refs, list) or not approved_refs:
+                continue
+            release_target = (
+                approval.get("release_target") if gate == "release" else None
+            )
+            try:
+                current_refs = gate_artifact_refs(
+                    root,
+                    state,
+                    policy,
+                    gate,
+                    release_target,
+                    verify_integrity=verify_artifact_integrity,
+                )
+            except ResearchCtlError as exc:
+                message = (
+                    f"approved Gate {gate} no longer has a valid current artifact "
+                    f"binding: {exc}"
+                )
+                (warnings if gate in allow_binding_drift_for else errors).append(message)
+                continue
+
+            def comparable_refs(values: list[Any]) -> list[str]:
+                fields = ("label", "path", *ARTIFACT_METADATA_FIELDS)
+                normalized = [
+                    {field: value.get(field) for field in fields}
+                    for value in values
+                    if isinstance(value, dict)
+                ]
+                return sorted(
+                    json.dumps(value, ensure_ascii=False, sort_keys=True)
+                    for value in normalized
+                )
+
+            if comparable_refs(current_refs) != comparable_refs(approved_refs):
+                message = (
+                    f"approved Gate {gate} current artifacts differ from its latest "
+                    "approved artifact_refs; reopen the Gate before changing them"
+                )
+                (warnings if gate in allow_binding_drift_for else errors).append(message)
 
     for history_label, reference in iter_gate_artifact_refs(state):
         structural_pointer_errors = artifact_pointer_errors(
@@ -1613,12 +2356,15 @@ def validate_state(
             ].strip():
                 errors.append("last_checkpoint summary must be non-empty")
             if not valid_timestamp(checkpoint.get("timestamp")):
-                errors.append("last_checkpoint timestamp must be ISO-8601")
+                errors.append(
+                    "last_checkpoint timestamp must be a timezone-explicit UTC timestamp"
+                )
     stage_history = state.get("stage_history")
     if not isinstance(stage_history, list):
         errors.append("stage_history must be a list")
     else:
         expected_stage = policy.stage_order[0]
+        previous_transition_at: datetime | None = None
         for index, transition in enumerate(stage_history):
             prefix = f"stage_history[{index}]"
             if not isinstance(transition, dict):
@@ -1650,16 +2396,86 @@ def validate_state(
                 "trigger"
             ].strip():
                 errors.append(f"{prefix} trigger must be non-empty")
-            if not valid_timestamp(transition.get("timestamp")):
-                errors.append(f"{prefix} timestamp must be ISO-8601")
+            else:
+                trigger = transition["trigger"]
+                gate_trigger = re.fullmatch(
+                    r"gate(-reopen)?:([a-z][a-z0-9_]*):(.+)", trigger
+                )
+                if gate_trigger:
+                    expected_action = "reopen" if gate_trigger.group(1) else "approve"
+                    trigger_gate = gate_trigger.group(2)
+                    trigger_decision_id = gate_trigger.group(3)
+                    linked = gate_decisions_by_id.get(trigger_decision_id)
+                    if linked is None:
+                        errors.append(f"{prefix} references an unknown Gate decision")
+                    else:
+                        linked_gate, linked_decision = linked
+                        if linked_gate != trigger_gate:
+                            errors.append(f"{prefix} trigger Gate does not match its decision")
+                        if linked_decision.get("action") != expected_action:
+                            errors.append(f"{prefix} trigger action does not match its decision")
+                        if linked_decision.get("decided_at") != transition.get("timestamp"):
+                            errors.append(f"{prefix} timestamp does not match its Gate decision")
+                        spec = policy.gate_specs.get(trigger_gate, {})
+                        expected_target = spec.get(
+                            "reopen_to" if expected_action == "reopen" else "advance_to"
+                        )
+                        if to_stage != expected_target:
+                            errors.append(
+                                f"{prefix} target does not match Gate {trigger_gate} policy"
+                            )
+                elif trigger not in {"checkpoint", "legacy-migration"}:
+                    errors.append(f"{prefix} has unsupported trigger {trigger!r}")
+            transition_at = parse_utc_timestamp(transition.get("timestamp"))
+            if transition_at is None:
+                errors.append(
+                    f"{prefix} timestamp must be a timezone-explicit UTC timestamp"
+                )
+            elif (
+                previous_transition_at is not None
+                and transition_at < previous_transition_at
+            ):
+                errors.append(f"{prefix} timestamp is earlier than the prior transition")
+            else:
+                previous_transition_at = transition_at
             if to_stage in policy.stage_order:
                 expected_stage = to_stage
         if expected_stage != state.get("current_stage"):
             errors.append(
                 "current_stage does not match the final recorded stage transition"
             )
+
+    recorded_events: list[tuple[str, Any]] = []
+    if isinstance(checkpoint, dict):
+        recorded_events.append(("last_checkpoint.timestamp", checkpoint.get("timestamp")))
+    if isinstance(stage_history, list):
+        recorded_events.extend(
+            (f"stage_history[{index}].timestamp", transition.get("timestamp"))
+            for index, transition in enumerate(stage_history)
+            if isinstance(transition, dict)
+        )
+    if isinstance(gates, dict):
+        for gate, record in gates.items():
+            history = record.get("history") if isinstance(record, dict) else None
+            if not isinstance(history, list):
+                continue
+            recorded_events.extend(
+                (f"Gate {gate} history[{index}].decided_at", decision.get("decided_at"))
+                for index, decision in enumerate(history)
+                if isinstance(decision, dict)
+            )
+    for event_label, raw_timestamp in recorded_events:
+        event_at = parse_utc_timestamp(raw_timestamp)
+        if event_at is None:
+            continue
+        if created_at is not None and event_at < created_at:
+            errors.append(f"{event_label} must not be earlier than created_at")
+        if updated_at is not None and event_at > updated_at:
+            errors.append(f"{event_label} must not be later than updated_at")
     if not (root / MEMORY_RELATIVE_PATH).is_file():
         errors.append(f"missing project memory: {MEMORY_RELATIVE_PATH}")
+    if not (root / policy.artifact_root).is_dir():
+        errors.append(f"missing artifact workspace: {policy.artifact_root}")
     exclude_path = git_exclude_path(root)
     if exclude_path is None:
         warnings.append(
@@ -1779,33 +2595,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def dispatch_command(
+    root: Path, policy: Policy, args: argparse.Namespace
+) -> int:
+    if args.command == "init":
+        return cmd_init(root, policy, args)
+    if args.command == "status":
+        return cmd_status(root, policy, args)
+    if args.command == "enable":
+        return cmd_toggle(root, policy, args, enabled=True)
+    if args.command == "disable":
+        return cmd_toggle(root, policy, args, enabled=False)
+    if args.command == "artifact":
+        return cmd_artifact(root, policy, args)
+    if args.command == "gate":
+        return cmd_gate(root, policy, args)
+    if args.command == "checkpoint":
+        return cmd_checkpoint(root, policy, args)
+    if args.command == "doctor":
+        return cmd_doctor(root, policy, args)
+    raise ResearchCtlError(f"unsupported command: {args.command}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         policy = load_policy()
         root = find_project_root()
-        if args.command == "init":
-            return cmd_init(root, policy, args)
-        if args.command == "status":
-            return cmd_status(root, policy, args)
-        if args.command == "enable":
-            return cmd_toggle(root, policy, args, enabled=True)
-        if args.command == "disable":
-            return cmd_toggle(root, policy, args, enabled=False)
-        if args.command == "artifact":
-            return cmd_artifact(root, policy, args)
-        if args.command == "gate":
-            return cmd_gate(root, policy, args)
-        if args.command == "checkpoint":
-            return cmd_checkpoint(root, policy, args)
-        if args.command == "doctor":
-            return cmd_doctor(root, policy, args)
+        mutating_commands = {
+            "init",
+            "enable",
+            "disable",
+            "artifact",
+            "gate",
+            "checkpoint",
+        }
+        if args.command in mutating_commands:
+            with state_mutation_lock(root, create=args.command == "init"):
+                return dispatch_command(root, policy, args)
+        return dispatch_command(root, policy, args)
     except ResearchCtlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    parser.error(f"unsupported command: {args.command}")
-    return 2
+    except (OSError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+        print(f"error: unexpected local I/O or data failure: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
