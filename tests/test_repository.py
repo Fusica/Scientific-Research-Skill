@@ -310,7 +310,7 @@ class RepositoryTest(unittest.TestCase):
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
         entry = marketplace["plugins"][0]
-        self.assertEqual(manifest["version"], "1.1.3")
+        self.assertEqual(manifest["version"], "1.1.4")
         self.assertEqual(entry["name"], manifest["name"])
         self.assertEqual(entry["version"], manifest["version"])
         self.assertEqual(entry["source"], {"source": "local", "path": "."})

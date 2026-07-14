@@ -2617,7 +2617,23 @@ def dispatch_command(
     raise ResearchCtlError(f"unsupported command: {args.command}")
 
 
+def configure_standard_streams() -> None:
+    """Keep Chinese project output reliable when Windows pipes use a legacy code page."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            # Embedded hosts may expose immutable streams. Command execution can
+            # still proceed, and the normal error boundary remains available.
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    configure_standard_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

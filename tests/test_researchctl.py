@@ -210,15 +210,18 @@ class ResearchCtlTest(unittest.TestCase):
         )
 
     def run_ctl(
-        self, *arguments: str, cwd: Path | None = None
+        self,
+        *arguments: str,
+        cwd: Path | None = None,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(RESEARCHCTL), *arguments],
             cwd=cwd or self.project,
-            env=self.ctl_environment(),
+            env=environment or self.ctl_environment(),
             check=False,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
         )
 
     def ctl_environment(self) -> dict[str, str]:
@@ -1830,7 +1833,13 @@ class ResearchCtlTest(unittest.TestCase):
     def test_unicode_project_without_git_initializes_and_audits(self) -> None:
         project = Path(self.temporary.name) / "无人机-研究"
         project.mkdir()
-        result = self.run_ctl("init", cwd=project)
+        restricted_environment = self.ctl_environment()
+        restricted_environment["PYTHONIOENCODING"] = "ascii"
+        result = self.run_ctl(
+            "init",
+            cwd=project,
+            environment=restricted_environment,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         memory = (project / ".research/memory.md").read_text(encoding="utf-8")
         self.assertIn("# 研究记忆：无人机-研究", memory)
