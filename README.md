@@ -29,6 +29,8 @@ Codex Plugin
 └── Project data: .research/         当前项目的本地状态、记忆与工作流产物
 ```
 
+`scripts/researchctl.py` 保持为唯一公开命令与写入口；实现层位于私有 `scripts/researchctl_core/`，按共享 schema/常量、policy、state store/validation、migration、artifact registry、Gate engine/validation、workspace checks、doctor aggregation、command orchestration 和 CLI 分模块。依赖方向单向汇入 doctor、commands 与 CLI，不增加第二套 state、schema 或写入口。
+
 ## 六阶段与四个 Gate
 
 <p align="center">
@@ -49,6 +51,8 @@ Codex Plugin
 | Experiment + Results | 基线、实验矩阵、执行记录、失败诊断、统计分析与 Claim—Evidence 对齐 |
 | Paper                | 结构、写作、数字与引用追溯、自审、编译和投稿检查                   |
 | Revision             | reviewer concern、补充证据、论文修改与逐点回复闭环                 |
+
+文献阶段可以调用项目可用的学术检索系统，但以 provider-neutral 的 search-run manifest、允许保留时的原始结果 Hash（否则记录不可保留原因）、筛选和 passage-level evidence 为审计边界。计算实验优先兼容 W&B：W&B 负责实时曲线、sweep 和协作查看，本地 `run_registry` 与导出 Hash 才是 Gate 可依赖的权威记录；没有 W&B 时可使用现有 tracker 或纯本地记录。论文阶段显式声明 LaTeX/BibTeX 或 Biber 构建链，执行 clean build、保留日志并检查渲染 PDF，不把某个模板、引擎或目录结构写死。
 
 ## 安装
 

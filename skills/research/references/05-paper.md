@@ -4,7 +4,37 @@ Assemble the manuscript from frozen evidence and claims.
 
 ## Establish the paper contract
 
-Record the audience, contribution hierarchy, venue/format constraints, required sections, anonymization and ethics/artifact requirements, and release target. Route material evidence gaps upstream and reopen the relevant Gate when the manuscript needs a claim beyond the frozen contract.
+Record the audience, contribution hierarchy, venue/format constraints, required sections, anonymization and ethics/artifact requirements, release target, and executable paper toolchain. Route material evidence gaps upstream and reopen the relevant Gate when the manuscript needs a claim beyond the frozen contract.
+
+For LaTeX projects, prefer the repository's existing `Makefile`, `.latexmkrc`, or documented build command; otherwise use an explicitly declared build such as `latexmk`. Do not assume `pdflatex`, BibTeX, or a fixed directory layout, and do not auto-modify source to make compilation pass. Record the minimum contract:
+
+```yaml
+paper_toolchain:
+  source_format: latex
+  entrypoint: main.tex
+  working_directory: .
+  template: {source_url: "", version: "", content_hash: null}
+  build:
+    command: ""
+    clean_command: ""
+    engine: ""
+    bibliography_backend: null
+  bibliography_files: []
+  figure_roots: []
+  tool_versions: {}
+  outputs: {pdf: "", log: "", render_dir: ""}
+  verification:
+    clean_build: false
+    fatal_errors: []
+    undefined_citations: []
+    undefined_references: []
+    missing_assets: []
+    warnings: []
+    pdf_content_hash: null
+    visual_review: {status: pending, reviewed_by: "", reviewed_at: null, notes: ""}
+```
+
+Declare `bibtex`, `biber`, or `none` and the bibliography files actually used. In `bibliography_provenance`, retain each bibliography source or export tool, retrieval/export time, file hash, citation-key mapping, and content-verification status. Non-LaTeX sources use an equivalent reproducible build and rendered-output contract rather than pretending to be TeX.
 
 ## Map claims before drafting
 
@@ -50,12 +80,14 @@ Before release:
 1. reproduce every material number from registered analyses and artifacts;
 2. audit claim wording, title, abstract, contribution list, conclusion, and limitations against the ledger;
 3. audit terminology, notation, citations, cross-references, figures, tables, captions, appendix, and supplement;
-4. compile through the complete bibliography pipeline and retain logs;
-5. inspect the rendered output, not only source text;
+4. run a clean build through the declared bibliography pipeline and retain commands, tool versions, logs, output path, and hash;
+5. render the PDF to pages or a contact sheet and record visual inspection with reviewer identity, not only source-text checks;
 6. check venue limits, required sections, anonymization, acknowledgments, metadata, ethics, and artifact requirements;
 7. verify every paper change and promised check.
 
 Register `paper.manuscript`, `claim_map`, `change_map`, `bibliography_provenance`, `compilation_log`, `rendered_output`, `render_inspection_record`, and `submission_checklist` for the release package.
+
+Keep figure source data, generation code or configuration, publication output, preview, and QA notes traceable through the existing paper and experiment manifests. Mechanical checks may report missing assets, undefined references, build failures, and warnings; they cannot certify scientific writing or visual quality.
 
 ## Request external release
 

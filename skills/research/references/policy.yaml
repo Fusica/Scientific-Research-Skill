@@ -115,6 +115,7 @@
       ],
       "approval_requires": [
         "audited run population and analysis provenance",
+        "local run registry resolves any external tracker references and exports to stable hashes",
         "claim ledger with calibrated wording and limitations",
         "negative, null, excluded, and contradictory outcomes retained",
         "explicit human approval with artifact references"
@@ -155,7 +156,8 @@
       },
       "approval_requires": [
         "release artifact paths and content hashes",
-        "all promised checks completed and rendered output inspected",
+        "declared source, build, and bibliography toolchain completed with retained logs",
+        "all promised checks completed and rendered output visually inspected",
         "claim, citation, anonymization, and cross-document consistency verified",
         "explicit human approval for the named release target"
       ],
@@ -216,8 +218,8 @@
       "reference": "02-literature.md",
       "required_inputs": ["research questions or candidate idea", "search scope and constraints"],
       "allowed_actions": ["register searches", "screen and read sources", "trace citations", "record supporting and conflicting evidence", "compare closest work", "revise idea boundaries"],
-      "required_evidence": ["search protocol", "paper registry", "passage-level evidence records", "closest-work comparison", "search limitations and stopping rule"],
-      "exit_criteria": ["material claims have evidence IDs or are marked as author hypotheses", "closest work is read at sufficient depth", "conflicts and unknowns are explicit", "idea implications are recorded"],
+      "required_evidence": ["provider-neutral search-run manifests with exact calls and retained raw-snapshot hashes or non-retention reasons", "source and screening registry", "passage-level evidence records", "closest-work comparison", "search limitations, coverage gaps, and stopping reason"],
+      "exit_criteria": ["material claims have evidence IDs or are marked as author hypotheses", "retrieval and deduplication decisions are reproducible without depending on one provider", "closest work is read at sufficient depth", "conflicts and unknowns are explicit", "idea implications are recorded"],
       "prohibited_actions": ["treat metadata or abstract-only reading as detailed comparison evidence", "use citation counts or repository popularity as contribution evidence"],
       "gate_to_exit": null
     },
@@ -236,8 +238,8 @@
       "reference": "04-experiment-results.md",
       "required_inputs": ["approved method and experiment contract", "registered predictions", "data, environment, resource, and safety profile"],
       "allowed_actions": ["run integrity checks and baselines", "execute registered experiments", "diagnose failures", "perform registered analyses", "generate traceable figures and tables", "promote or reject claims"],
-      "required_evidence": ["experiment matrix", "complete run registry", "decision log", "analysis registry", "artifact manifest", "claim ledger"],
-      "exit_criteria": ["run provenance and inclusion decisions are auditable", "analysis matches the statistical unit and data-generating process", "claim wording is bounded by evidence", "human approves claim_freeze"],
+      "required_evidence": ["experiment matrix", "complete local run registry with any tracker export references", "decision log", "analysis registry", "artifact manifest", "claim ledger"],
+      "exit_criteria": ["run provenance and inclusion decisions are auditable independent of external tracker availability", "analysis matches the statistical unit and data-generating process", "claim wording is bounded by evidence", "human approves claim_freeze"],
       "prohibited_actions": ["tune on the final test set", "change metrics or exclusions after seeing results without labeling exploratory analysis", "infer causality from an uncontrolled comparison"],
       "gate_to_exit": "claim_freeze"
     },
@@ -246,8 +248,8 @@
       "reference": "05-paper.md",
       "required_inputs": ["frozen claim ledger", "method and experiment artifacts", "literature evidence", "venue and anonymization requirements"],
       "allowed_actions": ["map claims to sections", "draft and revise", "integrate citations and artifacts", "compile and render", "audit consistency and submission constraints"],
-      "required_evidence": ["paper claim map", "paper change map", "bibliography provenance", "compilation and render checks", "submission checklist"],
-      "exit_criteria": ["every central claim and number traces backward", "wording stays within the claim ledger", "citations, cross-references, anonymity, and venue constraints pass", "human approves the named release target"],
+      "required_evidence": ["paper claim map", "paper change map", "bibliography provenance", "declared source and build toolchain", "clean compilation log and rendered visual inspection", "submission checklist"],
+      "exit_criteria": ["every central claim and number traces backward", "wording stays within the claim ledger", "the declared bibliography and build pipeline is reproducible", "citations, cross-references, anonymity, render inspection, and venue constraints pass", "human approves the named release target"],
       "prohibited_actions": ["draft around a material evidence gap", "strengthen wording beyond the frozen claim ledger"],
       "gate_to_exit": "release"
     },

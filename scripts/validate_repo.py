@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.1.4"
+PLUGIN_VERSION = "1.2.0"
 SCHEMA_VERSION = "1.0"
 WORKFLOW_VERSION = "1.1.0"
 
@@ -110,6 +110,23 @@ EXPECTED_SKILL_FILES = {
     "references/06-revision.md",
     "assets/state.template.json",
     "assets/memory.template.md",
+}
+
+EXPECTED_RESEARCHCTL_MODULES = {
+    "__init__.py",
+    "artifacts.py",
+    "cli.py",
+    "commands.py",
+    "constants.py",
+    "doctor.py",
+    "gates.py",
+    "gate_validation.py",
+    "migration.py",
+    "policy.py",
+    "store.py",
+    "state_validation.py",
+    "timeutils.py",
+    "workspace_validation.py",
 }
 
 EXTERNAL_REFERENCE_URLS = (
@@ -526,6 +543,17 @@ def validate_plugin() -> list[str]:
         errors.append("hooks: missing research-workflow-hook.js")
     if not (ROOT / "scripts/researchctl.py").is_file():
         errors.append("scripts: missing researchctl.py")
+    researchctl_core = ROOT / "scripts/researchctl_core"
+    discovered_modules = (
+        {path.name for path in researchctl_core.glob("*.py")}
+        if researchctl_core.is_dir()
+        else set()
+    )
+    if discovered_modules != EXPECTED_RESEARCHCTL_MODULES:
+        errors.append(
+            "scripts/researchctl_core: functional module set mismatch; "
+            f"found {sorted(discovered_modules)}"
+        )
 
     for legacy in (ROOT / "contracts", ROOT / "profiles", ROOT / "docs"):
         if legacy.exists() and any(legacy.rglob("*")):

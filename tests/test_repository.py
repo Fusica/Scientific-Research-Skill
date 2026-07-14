@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -310,7 +311,7 @@ class RepositoryTest(unittest.TestCase):
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
         entry = marketplace["plugins"][0]
-        self.assertEqual(manifest["version"], "1.1.4")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertEqual(entry["name"], manifest["name"])
         self.assertEqual(entry["version"], manifest["version"])
         self.assertEqual(entry["source"], {"source": "local", "path": "."})
@@ -337,6 +338,120 @@ class RepositoryTest(unittest.TestCase):
             "doctor",
         ):
             self.assertIn(command, result.stdout)
+
+    def test_researchctl_is_a_thin_facade_over_acyclic_functional_modules(self) -> None:
+        facade = ROOT / "scripts/researchctl.py"
+        self.assertLessEqual(len(facade.read_text(encoding="utf-8").splitlines()), 30)
+
+        core = ROOT / "scripts/researchctl_core"
+        expected = {
+            "__init__",
+            "artifacts",
+            "cli",
+            "commands",
+            "constants",
+            "doctor",
+            "gates",
+            "gate_validation",
+            "migration",
+            "policy",
+            "store",
+            "state_validation",
+            "timeutils",
+            "workspace_validation",
+        }
+        modules = {path.stem: path for path in core.glob("*.py")}
+        self.assertEqual(set(modules), expected)
+        self.assertLessEqual(
+            len(modules["doctor"].read_text(encoding="utf-8").splitlines()),
+            120,
+        )
+
+        dependencies: dict[str, set[str]] = {name: set() for name in modules}
+        definitions: dict[str, set[str]] = {}
+        shared_names = {
+            "GATE_IDS",
+            "STATE_RELATIVE_PATH",
+            "ARTIFACT_POINTER_FIELDS",
+            "REQUIRED_STATE_FIELDS",
+        }
+        for name, path in modules.items():
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            definitions[name] = {
+                target.id
+                for node in tree.body
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                for target in (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                if isinstance(target, ast.Name)
+            }
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                    dependency = node.module.split(".", 1)[0]
+                    if dependency in modules:
+                        dependencies[name].add(dependency)
+
+        for shared_name in shared_names:
+            owners = {name for name, names in definitions.items() if shared_name in names}
+            self.assertEqual(owners, {"constants"}, shared_name)
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            self.assertNotIn(name, visiting, f"circular researchctl import at {name}")
+            if name in visited:
+                return
+            visiting.add(name)
+            for dependency in dependencies[name]:
+                visit(dependency)
+            visiting.remove(name)
+            visited.add(name)
+
+        for name in sorted(modules):
+            visit(name)
+
+    def test_research_workflow_declares_retrieval_tracker_and_tex_contracts(self) -> None:
+        literature = (
+            ROOT / "skills/research/references/02-literature.md"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            "provider-neutral search-run manifest",
+            "provider_calls",
+            "raw_snapshot",
+            "nonretention_reason",
+            "ambiguous_pairs",
+            "stop_reason",
+        ):
+            self.assertIn(marker, literature)
+
+        experiments = (
+            ROOT / "skills/research/references/04-experiment-results.md"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            "authoritative audit record",
+            "prefer W&B",
+            "tracker_refs",
+            "sweep_id",
+            "backend: local",
+        ):
+            self.assertIn(marker, experiments)
+
+        paper = (ROOT / "skills/research/references/05-paper.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "paper_toolchain",
+            "bibliography_backend",
+            "latexmk",
+            "clean build",
+            "visual_review",
+            "reviewed_by",
+        ):
+            self.assertIn(marker, paper)
 
     def test_root_license_and_external_references_remain_link_only(self) -> None:
         self.assertIn("Copyright 2026 Fusica", (ROOT / "LICENSE").read_text())

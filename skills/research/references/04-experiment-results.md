@@ -41,7 +41,7 @@ Derive repetitions, uncertainty, effect thresholds, tests, and evaluation protoc
 
 ## Execute progressively
 
-Progress from integrity and smoke checks to baseline parity, the minimal mechanism, and the approved primary comparison. Add ablations, robustness, generalization, safety, scaling, or efficiency tests only when they resolve a registered claim or risk.
+Progress from integrity and smoke checks to baseline parity, the minimal mechanism, and the approved primary comparison. Give each phase an explicit attempt budget, fallback, and stop condition derived from the experiment contract; do not hard-code universal parity or variance thresholds. Add ablations, robustness, generalization, safety, scaling, or efficiency tests only when they resolve a registered claim or risk.
 
 ## Register every run
 
@@ -55,13 +55,33 @@ Write one immutable run record per attempt, including:
 
 Distinguish technical failures from negative or falsifying outcomes and retain every attempt.
 
+The local `experiment_results.run_registry` is the authoritative audit record. For computational experiments, prefer W&B when the project already supports it or the researcher selects it; use it for live metrics, groups, sweeps, artifacts, and collaboration, not as the only provenance store. Add optional tracker references to each run:
+
+```yaml
+tracker_refs:
+  - backend: wandb
+    entity: ""
+    project: ""
+    run_id: ""
+    run_url: ""
+    group: ""
+    job_type: ""
+    sweep_id: null
+    export:
+      path: ""
+      content_hash: null
+      exported_at: null
+```
+
+After a run or sweep, export the resolved configuration, summary, required metric history, and artifact manifest to stable local files and record their hashes. Version and hash sweep search spaces, objectives, budgets, schedulers, and stop rules before launch; retain failed, cancelled, preempted, and pruned trials. Never persist tracker credentials in research artifacts. If W&B is unavailable, an existing tracker or `backend: local` is valid when the same local provenance contract is satisfied; physical experiments may instead link sample batches, instruments, raw media, and anomaly records.
+
 ## Diagnose controlled changes
 
 Classify failures, reproduce the smallest failing case, and vary one causal factor where practical. Log the rationale, outcome, next action, impacted artifacts, and any reopened stage. Return upstream when an assumption or mechanism fails; stop when a kill criterion is met.
 
 ## Audit before analysis
 
-Audit inclusion/exclusion, provenance, metrics, statistical unit, missingness, dependence, failure handling, leakage, and test-set use before claim promotion. Distinguish pre-specified from exploratory analysis. Choose summaries and tests from the data-generating process; where material, report effect size and uncertainty and handle pairing, repeated measures, multiplicity, distributional assumptions, censoring, and missingness.
+Audit inclusion/exclusion, provenance, tracker-to-local identity mapping where used, metrics, statistical unit, missingness, dependence, failure handling, leakage, and test-set use before claim promotion. Distinguish pre-specified from exploratory analysis. Choose summaries and tests from the data-generating process; where material, report effect size and uncertainty and handle pairing, repeated measures, multiplicity, distributional assumptions, censoring, and missingness.
 
 ## Generate traceable result artifacts
 
