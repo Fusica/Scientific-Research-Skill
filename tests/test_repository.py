@@ -65,6 +65,13 @@ class RepositoryTest(unittest.TestCase):
                 "release",
             ],
         )
+        self.assertEqual(
+            policy["artifact_layout"]["generated_root"], ".research/artifacts"
+        )
+        self.assertEqual(
+            policy["artifact_layout"]["stage_path_template"],
+            ".research/artifacts/<stage-id>",
+        )
         self.assertEqual(policy["gates"]["idea_freeze"]["advance_to"], "method")
         self.assertEqual(
             policy["gates"]["method_experiment_approval"]["advance_to"],
@@ -125,7 +132,7 @@ class RepositoryTest(unittest.TestCase):
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
         entry = marketplace["plugins"][0]
-        self.assertEqual(manifest["version"], "1.1.1")
+        self.assertEqual(manifest["version"], "1.1.2")
         self.assertEqual(entry["name"], manifest["name"])
         self.assertEqual(entry["version"], manifest["version"])
         self.assertEqual(entry["source"], {"source": "local", "path": "."})

@@ -40,6 +40,15 @@ def policy_document() -> dict[str, object]:
                 "status",
             ]
         },
+        "artifact_layout": {
+            "generated_root": ".research/artifacts",
+            "stage_path_template": ".research/artifacts/<stage-id>",
+            "instruction": (
+                "Write new workflow artifacts under .research/artifacts/<stage-id>/; "
+                "never create project-root research/, contracts/, or artifacts/. "
+                "Register existing user files in place."
+            ),
+        },
         "gates": {
             "idea_freeze": {
                 "advance_to": "method",
@@ -190,7 +199,11 @@ class ResearchCtlTest(unittest.TestCase):
         stage, role = role_reference.split(".", 1)
         identifier = artifact_id or f"{stage}-{role}-001".upper().replace("_", "-")
         candidate = path or (
-            self.project / "artifacts" / f"{stage}-{role}-v{version}.md"
+            self.project
+            / ".research"
+            / "artifacts"
+            / stage
+            / f"{stage}-{role}-v{version}.md"
         )
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.write_text(
@@ -230,7 +243,10 @@ class ResearchCtlTest(unittest.TestCase):
     def test_init_is_idempotent_preserves_memory_and_sets_local_exclude(self) -> None:
         original_state = self.initialize()
         memory = self.project / ".research/memory.md"
+        artifact_root = self.project / ".research/artifacts"
+        self.assertTrue(artifact_root.is_dir())
         memory.write_text("personal project memory\n", encoding="utf-8")
+        artifact_root.rmdir()
 
         second = self.run_ctl("init")
 
@@ -238,6 +254,9 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertIn("state already exists; left unchanged", second.stdout)
         self.assertIn("memory already exists; left unchanged", second.stdout)
         self.assertEqual(self.load_state(), original_state)
+        self.assertTrue(artifact_root.is_dir())
+        for relative in ("research", "contracts", "artifacts"):
+            self.assertFalse((self.project / relative).exists())
         self.assertEqual(memory.read_text(encoding="utf-8"), "personal project memory\n")
         exclude_path = subprocess.run(
             ["git", "-C", str(self.project), "rev-parse", "--git-path", "info/exclude"],
@@ -251,6 +270,24 @@ class ResearchCtlTest(unittest.TestCase):
         lines = exclude.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines.count(".research/"), 1)
         self.assertFalse((self.project / ".gitignore").exists())
+
+    def test_policy_rejects_generated_artifact_root_outside_research(self) -> None:
+        policy = policy_document()
+        policy["artifact_layout"] = {
+            "generated_root": "artifacts",
+            "stage_path_template": "artifacts/<stage-id>",
+            "instruction": "Write new workflow artifacts under artifacts/<stage-id>/.",
+        }
+        self.policy.write_text(
+            json.dumps(policy, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_ctl("init")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must stay under .research", result.stderr)
+        self.assertFalse((self.project / ".research/state.json").exists())
 
     def test_status_json_and_nested_git_root(self) -> None:
         state = self.initialize()
@@ -293,14 +330,16 @@ class ResearchCtlTest(unittest.TestCase):
 
     def test_artifact_register_hashes_files_and_is_idempotent(self) -> None:
         self.initialize()
-        path = self.project / "artifacts/idea-card-v1.md"
+        path = self.project / ".research/artifacts/idea/idea-card-v1.md"
         pointer = self.register_artifact(
             "idea.idea_card",
             artifact_id="IDEA-CARD-001",
             path=path,
             content="# Frozen idea v1\n",
         )
-        self.assertEqual(pointer["path"], "artifacts/idea-card-v1.md")
+        self.assertEqual(
+            pointer["path"], ".research/artifacts/idea/idea-card-v1.md"
+        )
         self.assertEqual(pointer["artifact_id"], "IDEA-CARD-001")
         self.assertEqual(pointer["version"], "1")
         self.assertEqual(pointer["status"], "approval-ready")
@@ -324,7 +363,7 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
         self.assertIn("already registered", repeated.stdout)
 
-        conflicting = self.project / "artifacts/conflicting-v1.md"
+        conflicting = self.project / ".research/artifacts/idea/conflicting-v1.md"
         conflicting.write_text("different content\n", encoding="utf-8")
         rejected = self.run_ctl(
             "artifact",
@@ -348,9 +387,23 @@ class ResearchCtlTest(unittest.TestCase):
             pointer,
         )
 
+    def test_existing_project_file_can_still_be_registered_in_place(self) -> None:
+        self.initialize()
+        manuscript = self.project / "paper/main.tex"
+        pointer = self.register_artifact(
+            "paper.manuscript",
+            artifact_id="MANUSCRIPT-001",
+            path=manuscript,
+            content="Existing manuscript source\n",
+        )
+
+        self.assertEqual(pointer["path"], "paper/main.tex")
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
     def test_artifact_register_defaults_status_and_rejects_control_metadata(self) -> None:
         self.initialize()
-        artifact = self.project / "artifacts/idea-card.md"
+        artifact = self.project / ".research/artifacts/idea/idea-card.md"
         artifact.parent.mkdir(parents=True)
         artifact.write_text("# Idea\n", encoding="utf-8")
         registered = self.run_ctl(
@@ -431,7 +484,7 @@ class ResearchCtlTest(unittest.TestCase):
             "register",
             "idea_card",
             "--path",
-            "artifacts/missing.md",
+            ".research/artifacts/idea/missing.md",
             "--artifact-id",
             "IDEA-CARD-001",
             "--version",
@@ -442,7 +495,7 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(missing.returncode, 2)
         self.assertIn("cannot be resolved", missing.stderr)
 
-        directory = self.project / "artifacts/directory"
+        directory = self.project / ".research/artifacts/idea/directory"
         directory.mkdir(parents=True)
         rejected = self.run_ctl(
             "artifact",
@@ -479,7 +532,10 @@ class ResearchCtlTest(unittest.TestCase):
         )
 
         self.register_artifact("literature.evidence_base")
-        idea_path = self.project / "artifacts/idea-idea_card-v1.md"
+        idea_path = (
+            self.project
+            / ".research/artifacts/idea/idea-idea_card-v1.md"
+        )
         idea_path.write_text("tampered after registration\n", encoding="utf-8")
         stale = self.run_ctl(
             "gate", "approve", "idea_freeze", "--reason", "Ready"
@@ -539,7 +595,7 @@ class ResearchCtlTest(unittest.TestCase):
         self,
     ) -> None:
         self.initialize()
-        first_path = self.project / "artifacts/idea-card-v1.md"
+        first_path = self.project / ".research/artifacts/idea/idea-card-v1.md"
         self.register_artifact(
             "idea.idea_card",
             artifact_id="IDEA-CARD-001",
@@ -559,7 +615,9 @@ class ResearchCtlTest(unittest.TestCase):
             if reference["artifact_id"] == "IDEA-CARD-001"
         )
 
-        blocked_path = self.project / "artifacts/idea-card-blocked-v2.md"
+        blocked_path = (
+            self.project / ".research/artifacts/idea/idea-card-blocked-v2.md"
+        )
         blocked_path.write_text("# Blocked idea v2\n", encoding="utf-8")
         frozen = self.run_ctl(
             "artifact",
@@ -602,7 +660,7 @@ class ResearchCtlTest(unittest.TestCase):
         self.assertEqual(reused.returncode, 2)
         self.assertIn("new version at a new path", reused.stderr)
         first_path.write_text("# Idea v1\n", encoding="utf-8")
-        second_path = self.project / "artifacts/idea-card-v2.md"
+        second_path = self.project / ".research/artifacts/idea/idea-card-v2.md"
         self.register_artifact(
             "idea.idea_card",
             artifact_id="IDEA-CARD-001",
@@ -621,9 +679,15 @@ class ResearchCtlTest(unittest.TestCase):
             if reference["artifact_id"] == "IDEA-CARD-001"
         )
         self.assertEqual(first_reference["version"], "1")
-        self.assertEqual(first_reference["path"], "artifacts/idea-card-v1.md")
+        self.assertEqual(
+            first_reference["path"],
+            ".research/artifacts/idea/idea-card-v1.md",
+        )
         self.assertEqual(latest_reference["version"], "2")
-        self.assertEqual(latest_reference["path"], "artifacts/idea-card-v2.md")
+        self.assertEqual(
+            latest_reference["path"],
+            ".research/artifacts/idea/idea-card-v2.md",
+        )
 
         first_path.write_text("overwrote approved v1\n", encoding="utf-8")
         doctor = self.run_ctl("doctor")
@@ -635,7 +699,7 @@ class ResearchCtlTest(unittest.TestCase):
         )
         self.assertEqual(recoverable.returncode, 0, recoverable.stderr)
 
-        third_path = self.project / "artifacts/idea-card-v3.md"
+        third_path = self.project / ".research/artifacts/idea/idea-card-v3.md"
         self.register_artifact(
             "idea.idea_card",
             artifact_id="IDEA-CARD-001",

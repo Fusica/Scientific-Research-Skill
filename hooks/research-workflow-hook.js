@@ -167,6 +167,26 @@ function loadPolicy() {
   if (!policy.gates || typeof policy.gates !== "object" || Array.isArray(policy.gates)) {
     return null;
   }
+  const artifactLayout = policy.artifact_layout;
+  if (!artifactLayout || typeof artifactLayout !== "object" || Array.isArray(artifactLayout)) {
+    return null;
+  }
+  if (typeof artifactLayout.generated_root !== "string" || !artifactLayout.generated_root) {
+    return null;
+  }
+  const artifactRootParts = artifactLayout.generated_root.split("/");
+  if (artifactRootParts[0] !== ".research"
+    || artifactRootParts.some((part) => !part || part === "." || part === "..")) {
+    return null;
+  }
+  if (typeof artifactLayout.stage_path_template !== "string"
+    || artifactLayout.stage_path_template !== `${artifactLayout.generated_root}/<stage-id>`) {
+    return null;
+  }
+  if (typeof artifactLayout.instruction !== "string"
+    || !artifactLayout.instruction.includes(artifactLayout.stage_path_template)) {
+    return null;
+  }
   const stageIds = policy.stage_order.filter((item) => typeof item === "string" && item);
   const gateIds = policy.gate_order.filter((item) => typeof item === "string" && item);
   if (stageIds.length !== policy.stage_order.length || new Set(stageIds).size !== stageIds.length) {
@@ -312,6 +332,7 @@ function promptContext(context) {
     "Current-stage prohibited actions:",
     listLines(spec.prohibited_actions),
     "",
+    `Artifact layout: ${scalar(context.policy.artifact_layout.instruction)}`,
     "Use the $research Skill and load only the current-stage reference. policy.yaml is authoritative for evidence, Gate, and exit criteria.",
   ].join("\n"), MAX_PROMPT_CONTEXT_CHARS);
 }

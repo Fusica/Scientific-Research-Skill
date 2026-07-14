@@ -44,6 +44,11 @@
     "gate_actions": ["approve", "reopen"],
     "artifact_pointer_fields": ["path", "artifact_id", "version", "content_hash", "status"]
   },
+  "artifact_layout": {
+    "generated_root": ".research/artifacts",
+    "stage_path_template": ".research/artifacts/<stage-id>",
+    "instruction": "Write new workflow artifacts under .research/artifacts/<stage-id>/; never create project-root research/, contracts/, or artifacts/. Register existing user files in place."
+  },
   "gates": {
     "idea_freeze": {
       "label": "Idea freeze",

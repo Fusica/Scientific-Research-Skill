@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.1.2"
 SCHEMA_VERSION = "1.0"
 WORKFLOW_VERSION = "1.1.0"
 
@@ -214,6 +214,7 @@ def validate_skill() -> list[str]:
             "stage_order",
             "gate_order",
             "state_contract",
+            "artifact_layout",
             "gates",
             "allowed_transitions",
             "stages",
@@ -240,6 +241,23 @@ def validate_skill() -> list[str]:
         errors.append(
             "policy.yaml: artifact_pointer_fields must match the canonical pointer"
         )
+    artifact_layout = require_keys(
+        policy.get("artifact_layout"),
+        {"generated_root", "stage_path_template", "instruction"},
+        "policy.yaml artifact_layout",
+        errors,
+    )
+    if artifact_layout.get("generated_root") != ".research/artifacts":
+        errors.append("policy.yaml: generated artifact root must be .research/artifacts")
+    if artifact_layout.get("stage_path_template") != ".research/artifacts/<stage-id>":
+        errors.append("policy.yaml: stage artifact path template mismatch")
+    layout_instruction = artifact_layout.get("instruction")
+    if (
+        not isinstance(layout_instruction, str)
+        or ".research/artifacts/<stage-id>" not in layout_instruction
+        or "contracts/" not in layout_instruction
+    ):
+        errors.append("policy.yaml: artifact layout instruction is incomplete")
     if policy.get("stage_order") != STAGES:
         errors.append("policy.yaml: stage_order must contain the six canonical stages")
     if policy.get("gate_order") != GATES:

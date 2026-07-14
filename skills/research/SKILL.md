@@ -39,6 +39,7 @@ Use another stage only when the request requires a direct handoff or evidence ha
 - Give stable IDs to material research objects. Version and hash mutable specifications, and bind runs to the method, experiment specification, code, configuration, data/environment, randomization, and outputs used.
 - Preserve failed, excluded, null, negative, and contradictory evidence with reasons. Trace promoted claims backward to evidence and forward to manuscript and review artifacts.
 - Treat `.research/memory.md` only as bounded navigation context, never as evidence or approval authority.
+- Before creating a workflow-owned artifact, follow `artifact_layout` from policy as the sole output-location contract; do not invent parallel artifact roots.
 
 ## Update state safely
 

@@ -239,6 +239,31 @@ test("ordinary, missing, malformed, and disabled projects are strict no-ops", ()
   cleanup(disabled.temporary);
 });
 
+test("Hooks reject an artifact layout outside .research", () => {
+  const fixture = createProject();
+  const temporaryPlugin = fs.mkdtempSync(path.join(os.tmpdir(), "research-hook-plugin-"));
+  const unsafePolicy = structuredClone(policy);
+  unsafePolicy.artifact_layout = {
+    generated_root: "contracts",
+    stage_path_template: "contracts/<stage-id>",
+    instruction: "Write new workflow artifacts under contracts/<stage-id>/.",
+  };
+  write(
+    path.join(temporaryPlugin, "skills", "research", "references", "policy.yaml"),
+    `${JSON.stringify(unsafePolicy, null, 2)}\n`,
+  );
+
+  assert.deepEqual(runHook(
+    "UserPromptSubmit",
+    fixture.project,
+    { prompt: "Continue the research task." },
+    { env: { PLUGIN_ROOT: temporaryPlugin } },
+  ), {});
+
+  cleanup(fixture.temporary);
+  cleanup(temporaryPlugin);
+});
+
 test("all inactive Hook events are read-only and create no plugin data", () => {
   const fixture = createProject({ withState: false, withMemory: false });
   write(path.join(fixture.project, "README.md"), "ordinary repository\n");
@@ -344,6 +369,8 @@ test("UserPromptSubmit injects a compact current-stage boundary for research wor
   assert.match(context, /Current-stage prohibited actions/);
   assert.match(context, /change metrics or exclusions after seeing results/);
   assert.match(context, /claim_freeze \(pending\)/);
+  assert.match(context, /\.research\/artifacts\/<stage-id>/);
+  assert.match(context, /project-root research\/, contracts\/, or artifacts\//);
   assert.match(context, /Use the \$research Skill/);
   cleanup(fixture.temporary);
 });
@@ -453,7 +480,7 @@ test("PreToolUse blocks direct state edits but permits reads and researchctl", (
   assert.deepEqual(runHook("PreToolUse", fixture.project, {
     tool_name: "Bash",
     tool_input: {
-      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path artifacts/idea.md --artifact-id IDEA-1 --version 1 --status ready",
+      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path .research/artifacts/idea/idea.md --artifact-id IDEA-1 --version 1 --status ready",
     },
   }), {});
 
@@ -635,7 +662,7 @@ test("PostToolUse recognizes researchctl artifact registration as a state mutati
   const output = runHook("PostToolUse", fixture.project, {
     tool_name: "Bash",
     tool_input: {
-      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path artifacts/idea.md --artifact-id IDEA-1 --version 1 --status ready",
+      command: "python3 /plugin/scripts/researchctl.py artifact register idea_card --path .research/artifacts/idea/idea.md --artifact-id IDEA-1 --version 1 --status ready",
     },
     tool_response: { stdout: "registered artifact", exit_code: 0 },
   });

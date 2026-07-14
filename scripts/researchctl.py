@@ -70,6 +70,7 @@ class Policy:
     stage_order: tuple[str, ...]
     gate_order: tuple[str, ...]
     gate_specs: dict[str, dict[str, Any]]
+    artifact_root: Path
     raw: dict[str, Any]
 
 
@@ -196,6 +197,7 @@ def load_policy() -> Policy:
     stage_order = raw.get("stage_order")
     gate_order = raw.get("gate_order")
     gate_specs = raw.get("gates")
+    artifact_layout = raw.get("artifact_layout")
 
     if schema_version is None:
         raise ResearchCtlError("policy is missing schema_version")
@@ -221,6 +223,37 @@ def load_policy() -> Policy:
         raise ResearchCtlError("policy gates must be an object")
     if set(gate_specs) != set(GATE_IDS):
         raise ResearchCtlError("policy gates must define exactly the fixed Gate IDs")
+    if not isinstance(artifact_layout, dict):
+        raise ResearchCtlError("policy artifact_layout must be an object")
+    generated_root = artifact_layout.get("generated_root")
+    stage_path_template = artifact_layout.get("stage_path_template")
+    layout_instruction = artifact_layout.get("instruction")
+    if not isinstance(generated_root, str) or not generated_root.strip():
+        raise ResearchCtlError("policy artifact_layout.generated_root must be a path")
+    artifact_root = Path(generated_root)
+    if (
+        artifact_root.is_absolute()
+        or not artifact_root.parts
+        or artifact_root.parts[0] != RESEARCH_DIR
+        or ".." in artifact_root.parts
+    ):
+        raise ResearchCtlError(
+            "policy artifact_layout.generated_root must stay under .research"
+        )
+    expected_template = f"{artifact_root.as_posix()}/<stage-id>"
+    if stage_path_template != expected_template:
+        raise ResearchCtlError(
+            "policy artifact_layout.stage_path_template must be "
+            f"{expected_template!r}"
+        )
+    if (
+        not isinstance(layout_instruction, str)
+        or not layout_instruction.strip()
+        or expected_template not in layout_instruction
+    ):
+        raise ResearchCtlError(
+            "policy artifact_layout.instruction must state the stage path template"
+        )
     state_contract = raw.get("state_contract")
     if not isinstance(state_contract, dict):
         raise ResearchCtlError("policy state_contract must be an object")
@@ -259,6 +292,7 @@ def load_policy() -> Policy:
         stage_order=tuple(stage_order),
         gate_order=tuple(gate_order),
         gate_specs=normalized_specs,
+        artifact_root=artifact_root,
         raw=raw,
     )
 
@@ -502,6 +536,7 @@ def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
     state_path = root / STATE_RELATIVE_PATH
     memory_path = root / MEMORY_RELATIVE_PATH
     legacy_path = root / LEGACY_RELATIVE_PATH
+    artifact_root = root / policy.artifact_root
     notes: list[str] = []
 
     if state_path.exists():
@@ -525,6 +560,16 @@ def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
         print(f"created {memory_path}")
+
+    artifact_root_existed = artifact_root.is_dir()
+    try:
+        artifact_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ResearchCtlError(
+            f"cannot create artifact workspace {artifact_root}: {exc}"
+        ) from exc
+    if not artifact_root_existed:
+        print(f"created {artifact_root}")
 
     if ensure_local_git_exclude(root):
         print("added .research/ to this clone's Git info/exclude")
