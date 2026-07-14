@@ -748,7 +748,7 @@ test("PostToolUse accepts an explicitly reopened downstream Gate and rejects poi
   cleanup(fixture.temporary);
 });
 
-test("Stop blocks once for a material semantic audit and emits the exact release shape", () => {
+test("Stop preserves the preceding answer and requests one audit addendum", () => {
   const fixture = createProject();
   const material = "The experiment is completed and verified. Accuracy improved by 12%, all citations were checked, and the evidence proves the claim is novel.";
   const output = runHook("Stop", fixture.project, {
@@ -759,6 +759,11 @@ test("Stop blocks once for a material semantic audit and emits the exact release
   assert.equal(output.decision, "block");
   assert.ok(output.reason.length <= 1800);
   assert.match(output.reason, /single stop-time semantic audit/);
+  assert.match(output.reason, /preceding assistant answer must remain unchanged/);
+  assert.match(output.reason, /do not reproduce, rewrite, replace, or silently correct it/);
+  assert.match(output.reason, /Return only a concise, evidence-bounded audit addendum/);
+  assert.match(output.reason, /beginning with `\[Stop Hook Review\]`/);
+  assert.doesNotMatch(output.reason, /corrected, evidence-bounded user-facing answer/);
   assert.match(output.reason, /applicable policy invariants/);
   assert.match(output.reason, /Claims, numbers, artifacts/);
   assert.match(output.reason, /Claim scope and certainty/);

@@ -1748,12 +1748,13 @@ function stopAudit(context, input) {
     ? context.policy.semantic_audit
     : [];
   const reason = bounded([
-    "Run the single stop-time semantic audit with the current session model before returning the final answer. Do not reveal private chain-of-thought; return only a corrected, evidence-bounded user-facing answer.",
+    "Run the single stop-time semantic audit with the current session model. The preceding assistant answer must remain unchanged: do not reproduce, rewrite, replace, or silently correct it.",
+    "Return only a concise, evidence-bounded audit addendum in the same language as the preceding answer, beginning with `[Stop Hook Review]`. State that the review passed when no material issue is found; otherwise state the issue and the bounded correction the user should apply. Do not reveal private chain-of-thought.",
     `Active stage: ${scalar(context.state.current_stage, "invalid")}`,
     `Gate to exit: ${gate ? `${gate} (${scalar(gateStatus(context, gate), "missing")})` : "none"}`,
     "Check the applicable policy invariants:",
     listLines(auditItems),
-    "Correct any issue and then finish. This Hook requests exactly one continuation; stop_hook_active prevents another audit loop.",
+    "Finish after the audit addendum. This Hook requests exactly one continuation; stop_hook_active prevents another audit loop.",
   ].join("\n"), MAX_STOP_REASON_CHARS);
   return { decision: "block", reason };
 }

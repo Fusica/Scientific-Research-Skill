@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 SCHEMA_VERSION = "1.0"
 WORKFLOW_VERSION = "1.1.0"
 
