@@ -96,11 +96,18 @@ class RepositoryTest(unittest.TestCase):
         )
 
     def test_state_and_memory_templates_are_project_local_contract(self) -> None:
+        policy = json.loads(
+            (ROOT / "skills/research/references/policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
         state = json.loads(
             (ROOT / "skills/research/assets/state.template.json").read_text(
                 encoding="utf-8"
             )
         )
+        self.assertEqual(policy["workflow_version"], "1.1.0")
+        self.assertEqual(state["workflow_version"], policy["workflow_version"])
         self.assertTrue(state["enabled"])
         self.assertEqual(state["current_stage"], "idea")
         self.assertTrue(all(gate["status"] == "pending" for gate in state["gates"].values()))
@@ -118,7 +125,7 @@ class RepositoryTest(unittest.TestCase):
             (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
         )
         entry = marketplace["plugins"][0]
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.1.1")
         self.assertEqual(entry["name"], manifest["name"])
         self.assertEqual(entry["version"], manifest["version"])
         self.assertEqual(entry["source"], {"source": "local", "path": "."})

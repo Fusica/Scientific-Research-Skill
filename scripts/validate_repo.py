@@ -17,8 +17,9 @@ except ModuleNotFoundError:  # pragma: no cover - reported as a validation error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "scientific-research-skill"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 SCHEMA_VERSION = "1.0"
+WORKFLOW_VERSION = "1.1.0"
 
 STAGES = [
     "idea",
@@ -224,8 +225,8 @@ def validate_skill() -> list[str]:
     )
     if policy.get("schema_version") != SCHEMA_VERSION:
         errors.append("policy.yaml: schema_version mismatch")
-    if policy.get("workflow_version") != PLUGIN_VERSION:
-        errors.append("policy.yaml: workflow_version must match plugin version")
+    if policy.get("workflow_version") != WORKFLOW_VERSION:
+        errors.append("policy.yaml: workflow_version mismatch")
     state_contract = require_mapping(
         policy.get("state_contract"), "policy.yaml state_contract", errors
     )
@@ -351,7 +352,7 @@ def validate_skill() -> list[str]:
     )
     if state.get("schema_version") != SCHEMA_VERSION:
         errors.append("state.template.json: schema_version mismatch")
-    if state.get("workflow_version") != PLUGIN_VERSION:
+    if state.get("workflow_version") != WORKFLOW_VERSION:
         errors.append("state.template.json: workflow_version mismatch")
     if state.get("current_stage") != STAGES[0]:
         errors.append("state.template.json: current_stage must start at idea")
@@ -481,7 +482,8 @@ def main() -> int:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(
-        "Validated scientific-research-skill 1.1.0: one Skill, six stages, "
+        f"Validated scientific-research-skill {PLUGIN_VERSION} "
+        f"(workflow {WORKFLOW_VERSION}): one Skill, six stages, "
         "four Gates, project-local state, five Hook events, and link-only external references."
     )
     return 0

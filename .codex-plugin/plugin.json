@@ -1,6 +1,6 @@
 {
   "name": "scientific-research-skill",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Project-scoped research workflow with six stages, explicit human Gates, local memory, and mechanically checked Codex Hook boundaries.",
   "author": {
     "name": "Fusica",
