@@ -307,12 +307,13 @@ def _render_artifacts(
                 timeline=timeline,
             )
         )
+    empty_state = "" if cards else '<p class="empty">尚无 v2 artifact。</p>'
     return (
         '<section class="panel"><p class="eyebrow">ARTIFACT REGISTRY V2</p>'
         '<h2>当前 revision、live source 与不可变历史</h2>'
         '<p>source 状态比较当前工作文件与已登记 revision；Gate-bound 指向审批时固定的 snapshot。</p>'
         f'<div class="artifact-grid">{"".join(cards)}</div>'
-        f'{"" if cards else "<p class=\"empty\">尚无 v2 artifact。</p>"}</section>'
+        f"{empty_state}</section>"
     )
 
 
@@ -519,10 +520,11 @@ def _render_timeline(
         f'<li><time>{_escape(timestamp or "<missing>")}</time><strong>{_escape(label)}</strong></li>'
         for timestamp, label in sorted(events, key=lambda item: item[0])
     )
+    empty_state = "" if items else '<p class="empty">尚无事件。</p>'
     return (
         '<section class="panel"><p class="eyebrow">RECOVERY TIMELINE</p><h2>可恢复事件</h2>'
         f'<ol class="timeline">{items}</ol>'
-        f'{"" if items else "<p class=\"empty\">尚无事件。</p>"}</section>'
+        f"{empty_state}</section>"
     )
 
 
