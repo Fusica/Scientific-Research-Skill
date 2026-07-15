@@ -4,6 +4,12 @@ Resolve the concern, apply and verify the change, then write the response. Treat
 the response letter as an editor-facing explanation, not a change log or results
 appendix.
 
+## Keep stable working paths
+
+Maintain the revised manuscript, review map, change log, response document, manuscript diff, verification records, rendered output, and release checklist under the shared `policy.artifact_layout` contract.
+
+Give material review and change records stable IDs. If a prior mapping or judgment was wrong, preserve it and add a corrected record with a new record ID, `supersedes` link, and reason. Use a registered manifest for directories, oversized files, and large verification or render collections.
+
 ## Preserve and decompose the review
 
 Preserve editor/reviewer hierarchy and verbatim wording. Give each comment a stable ID, split compound comments into atomic concerns, and classify each concern. Separate summary or praise from actionable feedback. For each atomic concern, identify both the surface request and the underlying question whose answer could change the reviewer's judgment. Record its evidence, affected claims and locations, required versus optional action, missing human input, and verification test.
@@ -14,6 +20,8 @@ Use an entry such as:
 
 ```yaml
 comment_id: R1-C01
+record_id: REVIEW-RECORD-001
+supersedes: null
 reviewer: Reviewer 1
 verbatim_comment: ""
 atomic_concern: ""
@@ -58,7 +66,9 @@ Use `required`, `optional`, or `not_adopted` for necessity and justify non-adopt
 
 Choose among existing evidence, clearer wording, registered reanalysis, or genuinely necessary new work. Separate must-fix items from optional strengthening and inspect existing runs, evaluation-only options, provenance, and the exact claim before proposing reruns. Select the smallest evidence set that decides the concern; do not use data volume as a proxy for an answer. Correct misunderstandings directly with evidence.
 
-Return to literature, method, experiment/results, or paper work when evidence is missing. Reopen affected Gates when a frozen artifact or claim must change.
+Return to literature, method, experiment/results, or paper work when evidence is missing. When an approved boundary must change, apply the earliest affected policy Gate's `reopen_when_changed` contract first.
+
+If `claim_freeze` was approved with `retrospective_revision_import`, treat its persistent warning as an explicit historical provenance gap, not as proof that the missing experiment evidence was verified. Keep the imported manuscript's claims within the registered claim ledger, and register/hash every new revision experiment, reanalysis, manuscript change, response artifact, and release artifact normally. Any change to the frozen claim boundary still requires reopening `claim_freeze`; the exception never carries into `release`.
 
 ## Apply and verify before responding
 
@@ -80,6 +90,6 @@ Tables, figures, and numbers support the answer; they do not constitute it. Stat
 
 Check every comment, promised action, number, citation, location, manuscript/response statement, claim boundary, and rendered change against the claim ledger and affected files.
 
-Register `revision.revised_manuscript`, `review_map`, `change_log`, `response_document`, `manuscript_diff`, `verification_records`, `rendered_output`, and `release_checklist` for the release package.
+Maintain one stable working artifact for each of `revision.revised_manuscript`, `review_map`, `change_log`, `response_document`, `manuscript_diff`, `verification_records`, `rendered_output`, and `release_checklist`, then register their current revisions for the release package. Registration snapshots files, not directories; use a manifest where a role represents a collection.
 
-After explicit human approval of the exact revised manuscript and response artifacts, record `release` for target `revision_rebuttal` through `researchctl`. Reopen it after any material edit or failed promise, number, citation, location, render, or consistency check; external sending still requires release authority.
+Use `policy.stages.revision.exit_criteria` and the revision stage's GateRef in `policy.workflow_graph.stage_exit_requirements` as the sole completion, binding, mutability, and reopen contract. After explicit human approval, approve that GateRef through `researchctl` with the policy-required decision review fields. Gate approval does not itself authorize external sending.

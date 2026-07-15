@@ -5,10 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .artifacts import validate_artifact_identities, validate_artifact_registry
+from .artifacts import validate_artifact_registry
 from .constants import Policy
 from .gate_validation import validate_gate_bindings, validate_gate_records
-from .state_validation import validate_state_envelope, validate_state_timeline
+from .state_validation import (
+    validate_activation_history,
+    validate_lifecycle_record,
+    validate_state_envelope,
+    validate_state_timeline,
+)
 from .workspace_validation import validate_workspace
 
 
@@ -26,6 +31,7 @@ def validate_state(
     warnings: list[str] = []
 
     created_at, updated_at = validate_state_envelope(state, policy, errors)
+    validate_activation_history(state, policy, errors)
     gates, gate_decisions_by_id = validate_gate_records(
         root,
         state,
@@ -34,25 +40,22 @@ def validate_state(
     )
 
     artifacts = state.get("artifacts")
-    if not isinstance(artifacts, (dict, list)):
-        errors.append("artifacts must be an object or list")
-    else:
-        validate_artifact_registry(
-            root,
-            artifacts,
-            policy,
-            errors,
-            warnings,
-            verify_integrity=verify_artifact_integrity,
-        )
-        validate_artifact_identities(
-            state,
-            policy,
-            errors,
-            warnings,
-            allow_binding_drift_for=allow_binding_drift_for,
-        )
-
+    validate_artifact_registry(
+        root,
+        artifacts,
+        state,
+        policy,
+        errors,
+        warnings,
+        verify_integrity=verify_artifact_integrity,
+    )
+    validate_lifecycle_record(
+        root,
+        state,
+        policy,
+        gate_decisions_by_id,
+        errors,
+    )
     validate_gate_bindings(
         root,
         state,

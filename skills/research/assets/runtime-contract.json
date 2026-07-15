@@ -1,0 +1,95 @@
+{
+  "contract_version": "2.0",
+  "state_schema_version": "2.0",
+  "state": {
+    "required_fields": [
+      "schema_version",
+      "workflow_version",
+      "enabled",
+      "project_id",
+      "project_name",
+      "current_stage",
+      "lifecycle",
+      "activation_history",
+      "gates",
+      "artifacts",
+      "last_checkpoint",
+      "stage_history",
+      "created_at",
+      "updated_at"
+    ]
+  },
+  "decision": {
+    "required_fields": [
+      "decision_id",
+      "action",
+      "previous_status",
+      "new_status",
+      "reason",
+      "actor",
+      "decided_at",
+      "artifact_refs",
+      "supporting_evidence_ids",
+      "opposing_evidence_ids",
+      "unresolved_risks",
+      "decision_conditions"
+    ]
+  },
+  "lifecycle": {
+    "statuses": ["active", "terminated", "completed"],
+    "actions": ["terminate", "complete", "reopen"],
+    "record_fields": ["status", "latest_decision_id", "history"],
+    "decision_fields": ["stage"],
+    "decision_optional_fields": ["gate_ref", "gate_decision_id"]
+  },
+  "activation": {
+    "actions": ["enable", "disable"],
+    "event_fields": [
+      "action",
+      "previous_enabled",
+      "new_enabled",
+      "reason",
+      "actor",
+      "decided_at"
+    ]
+  },
+  "gate": {
+    "statuses": ["pending", "approved", "reopened"],
+    "actions": ["approve", "reopen"],
+    "record_fields": ["status", "latest_decision_id", "history"],
+    "target_container_fields": ["targets"],
+    "decision_optional_fields": [
+      "approval_mode",
+      "waived_artifact_roles",
+      "selection",
+      "cascade"
+    ],
+    "cascade_fields": [
+      "upstream_gate_ref",
+      "upstream_decision_id",
+      "upstream_reason"
+    ],
+    "gate_ref_required_fields": ["gate"],
+    "gate_ref_optional_fields": ["target"],
+    "selection_fields": ["selected_id", "artifact_ref"]
+  },
+  "artifact": {
+    "entry_fields": ["current_revision", "revisions"],
+    "revision_fields": [
+      "revision",
+      "source_path",
+      "snapshot_path",
+      "content_hash",
+      "size_bytes",
+      "registered_at"
+    ],
+    "reference_prefix_fields": ["label", "artifact_id"]
+  },
+  "checkpoint": {
+    "fields": ["summary", "timestamp"]
+  },
+  "stage_transition": {
+    "fields": ["from_stage", "to_stage", "trigger", "timestamp"],
+    "trigger_prefixes": ["checkpoint", "gate-approve", "gate-reopen"]
+  }
+}

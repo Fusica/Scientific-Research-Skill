@@ -3,6 +3,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const SUPPORTED_EVENTS = new Set([
   "SessionStart",
@@ -14,30 +15,11 @@ const SUPPORTED_EVENTS = new Set([
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_POLICY_BYTES = 256 * 1024;
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
-// Event fields are already bounded by the complete stdin envelope. Keep their
-// contents position-invariant below that envelope cap instead of silently
-// ignoring a mechanically relevant statement placed near the end.
-const MAX_EVENT_TEXT_CHARS = MAX_INPUT_BYTES;
 const MAX_SESSION_CONTEXT_CHARS = 800;
-const MAX_PROMPT_CONTEXT_CHARS = 2600;
+const MAX_PROMPT_CONTEXT_CHARS = 400;
 const MAX_POST_CONTEXT_CHARS = 4200;
 const MAX_STOP_REASON_CHARS = 1800;
 const MAX_TOOL_TEXT_CHARS = MAX_INPUT_BYTES;
-const REQUIRED_STATE_FIELDS = [
-  "schema_version",
-  "workflow_version",
-  "enabled",
-  "project_id",
-  "project_name",
-  "current_stage",
-  "gates",
-  "artifacts",
-  "last_checkpoint",
-  "stage_history",
-  "created_at",
-  "updated_at",
-];
-
 function readStdin() {
   return new Promise((resolve) => {
     const chunks = [];
@@ -59,10 +41,116 @@ function readStdin() {
   });
 }
 
+function parseJsonWithoutDuplicateKeys(raw) {
+  const source = raw.replace(/^\uFEFF/, "");
+  let cursor = 0;
+  const fail = () => { throw new SyntaxError("invalid or duplicate-key JSON"); };
+  const skipWhitespace = () => {
+    while (cursor < source.length && /[\t\n\r ]/.test(source[cursor])) cursor += 1;
+  };
+  const parseString = () => {
+    if (source[cursor] !== '"') fail();
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {
+      const character = source[cursor];
+      if (character === '"') {
+        cursor += 1;
+        return JSON.parse(source.slice(start, cursor));
+      }
+      if (character === "\\") {
+        cursor += 1;
+        if (cursor >= source.length) fail();
+        if (source[cursor] === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(source.slice(cursor + 1, cursor + 5))) fail();
+          cursor += 5;
+          continue;
+        }
+        if (!/["\\/bfnrt]/.test(source[cursor])) fail();
+        cursor += 1;
+        continue;
+      }
+      if (character.charCodeAt(0) < 0x20) fail();
+      cursor += 1;
+    }
+    fail();
+    return "";
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const character = source[cursor];
+    if (character === "{") {
+      cursor += 1;
+      skipWhitespace();
+      const keys = new Set();
+      if (source[cursor] === "}") {
+        cursor += 1;
+        return;
+      }
+      while (cursor < source.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) fail();
+        keys.add(key);
+        skipWhitespace();
+        if (source[cursor] !== ":") fail();
+        cursor += 1;
+        parseValue();
+        skipWhitespace();
+        if (source[cursor] === "}") {
+          cursor += 1;
+          return;
+        }
+        if (source[cursor] !== ",") fail();
+        cursor += 1;
+      }
+      fail();
+      return;
+    }
+    if (character === "[") {
+      cursor += 1;
+      skipWhitespace();
+      if (source[cursor] === "]") {
+        cursor += 1;
+        return;
+      }
+      while (cursor < source.length) {
+        parseValue();
+        skipWhitespace();
+        if (source[cursor] === "]") {
+          cursor += 1;
+          return;
+        }
+        if (source[cursor] !== ",") fail();
+        cursor += 1;
+      }
+      fail();
+      return;
+    }
+    if (character === '"') {
+      parseString();
+      return;
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, cursor)) {
+        cursor += literal.length;
+        return;
+      }
+    }
+    const number = source.slice(cursor).match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);
+    if (!number) fail();
+    cursor += number[0].length;
+  };
+  parseValue();
+  skipWhitespace();
+  if (cursor !== source.length) fail();
+  return JSON.parse(source);
+}
+
 function parseObject(raw) {
   if (typeof raw !== "string" || !raw.trim()) return null;
   try {
-    const value = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    const value = parseJsonWithoutDuplicateKeys(raw);
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch (_error) {
     return null;
@@ -136,24 +224,6 @@ function inputCwd(input) {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function inputText(input, keys) {
-  const value = firstDefined(input, keys);
-  return typeof value === "string" ? cleanText(value).slice(0, MAX_EVENT_TEXT_CHARS) : "";
-}
-
-function userPrompt(input) {
-  return inputText(input, ["prompt", "user_prompt", "userPrompt"]);
-}
-
-function lastAssistantMessage(input) {
-  return inputText(input, [
-    "last_assistant_message",
-    "lastAssistantMessage",
-    "assistant_message",
-    "assistantMessage",
-  ]);
-}
-
 function eventName(input) {
   const fromInput = firstDefined(input, ["hook_event_name", "hookEventName", "event_name"]);
   const fromArg = process.argv[2];
@@ -194,7 +264,184 @@ function pluginRoot() {
   return path.resolve(__dirname, "..");
 }
 
-function loadPolicy() {
+function uniqueStringList(value) {
+  return Array.isArray(value) && value.length > 0
+    && value.every((item) => typeof item === "string" && item.trim())
+    && new Set(value).size === value.length;
+}
+
+function optionalUniqueStringList(value) {
+  return Array.isArray(value)
+    && value.every((item) => typeof item === "string" && item.trim())
+    && new Set(value).size === value.length;
+}
+
+function artifactRoleReference(value, stageIds) {
+  const match = typeof value === "string"
+    ? /^([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)$/.exec(value)
+    : null;
+  return match !== null && stageIds.includes(match[1]);
+}
+
+function validArtifactContract(contract, stageIds) {
+  if (!plainObject(contract)
+    || !uniqueStringList(contract.required_artifact_roles)
+    || contract.required_artifact_roles.some(
+      (role) => !artifactRoleReference(role, stageIds),
+    )) return false;
+  const mutable = contract.mutable_after_approval_roles ?? [];
+  return optionalUniqueStringList(mutable)
+    && mutable.every((role) => artifactRoleReference(role, stageIds))
+    && mutable.every((role) => contract.required_artifact_roles.includes(role));
+}
+
+const RETROSPECTIVE_MODE_MARKERS = [
+  "cli_flag", "eligibility", "claim_scope", "waivable_historical_roles",
+];
+const RESERVED_GATE_CLI_FLAGS = new Set([
+  "--help",
+  "--reason",
+  "--supporting-evidence-id",
+  "--opposing-evidence-id",
+  "--unresolved-risk",
+  "--decision-condition",
+  "--target",
+  "--selected-id",
+  "--approval-mode",
+]);
+
+function sameFieldSet(value, expected) {
+  return plainObject(value)
+    && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
+}
+
+function sameStringSet(value, expected) {
+  return uniqueStringList(value)
+    && [...value].sort().join("\0") === [...expected].sort().join("\0");
+}
+
+function retrospectiveApprovalMode(spec) {
+  const modes = plainObject(spec) ? spec.approval_modes : null;
+  if (!plainObject(modes)) return null;
+  const matches = Object.entries(modes).filter(([mode, contract]) => (
+    mode !== spec.default_approval_mode
+    && plainObject(contract)
+    && RETROSPECTIVE_MODE_MARKERS.every((field) => (
+      Object.prototype.hasOwnProperty.call(contract, field)
+    ))
+  ));
+  return matches.length === 1 ? matches[0][0] : null;
+}
+
+function loadRuntimeContract() {
+  const candidate = path.join(
+    pluginRoot(), "skills", "research", "assets", "runtime-contract.json",
+  );
+  const runtime = safeReadObject(candidate, MAX_POLICY_BYTES);
+  if (!sameFieldSet(runtime, [
+    "contract_version", "state_schema_version", "state", "decision", "lifecycle",
+    "activation", "gate", "artifact", "checkpoint", "stage_transition",
+  ]) || runtime.contract_version !== "2.0"
+    || typeof runtime.state_schema_version !== "string"
+    || !runtime.state_schema_version.trim()) return null;
+  const requiredLists = {
+    state: ["required_fields"],
+    decision: ["required_fields"],
+    lifecycle: [
+      "statuses", "actions", "record_fields", "decision_fields",
+      "decision_optional_fields",
+    ],
+    activation: ["actions", "event_fields"],
+    gate: [
+      "statuses", "actions", "record_fields", "target_container_fields",
+      "decision_optional_fields", "cascade_fields", "gate_ref_required_fields",
+      "gate_ref_optional_fields", "selection_fields",
+    ],
+    artifact: ["entry_fields", "revision_fields", "reference_prefix_fields"],
+    checkpoint: ["fields"],
+    stage_transition: ["fields", "trigger_prefixes"],
+  };
+  for (const [sectionName, fieldNames] of Object.entries(requiredLists)) {
+    const section = runtime[sectionName];
+    if (!sameFieldSet(section, fieldNames)
+      || fieldNames.some((field) => !uniqueStringList(section[field]))) {
+      return null;
+    }
+  }
+  const disjoint = (left, right) => !left.some((field) => right.includes(field));
+  for (const [left, right] of [
+    [runtime.decision.required_fields, runtime.lifecycle.decision_fields],
+    [runtime.decision.required_fields, runtime.lifecycle.decision_optional_fields],
+    [runtime.lifecycle.decision_fields, runtime.lifecycle.decision_optional_fields],
+    [runtime.decision.required_fields, runtime.gate.decision_optional_fields],
+    [runtime.gate.record_fields, runtime.gate.target_container_fields],
+    [runtime.gate.gate_ref_required_fields, runtime.gate.gate_ref_optional_fields],
+    [runtime.artifact.reference_prefix_fields, runtime.artifact.revision_fields],
+  ]) {
+    if (!disjoint(left, right)) return null;
+  }
+  const fixedV2Fields = [
+    [runtime.state.required_fields, [
+      "schema_version", "workflow_version", "enabled", "project_id", "project_name",
+      "current_stage", "lifecycle", "activation_history", "gates", "artifacts",
+      "last_checkpoint", "stage_history", "created_at", "updated_at",
+    ]],
+    [runtime.decision.required_fields, [
+      "decision_id", "action", "previous_status", "new_status", "reason", "actor",
+      "decided_at", "artifact_refs", "supporting_evidence_ids",
+      "opposing_evidence_ids", "unresolved_risks", "decision_conditions",
+    ]],
+    [runtime.lifecycle.record_fields, ["status", "latest_decision_id", "history"]],
+    [runtime.lifecycle.decision_fields, ["stage"]],
+    [runtime.activation.event_fields, [
+      "action", "previous_enabled", "new_enabled", "reason", "actor", "decided_at",
+    ]],
+    [runtime.gate.record_fields, ["status", "latest_decision_id", "history"]],
+    [runtime.gate.target_container_fields, ["targets"]],
+    [runtime.gate.cascade_fields, [
+      "upstream_gate_ref", "upstream_decision_id", "upstream_reason",
+    ]],
+    [runtime.gate.gate_ref_required_fields, ["gate"]],
+    [runtime.gate.gate_ref_optional_fields, ["target"]],
+    [runtime.gate.selection_fields, ["selected_id", "artifact_ref"]],
+    [runtime.artifact.entry_fields, ["current_revision", "revisions"]],
+    [runtime.artifact.revision_fields, [
+      "revision", "source_path", "snapshot_path", "content_hash", "size_bytes",
+      "registered_at",
+    ]],
+    [runtime.artifact.reference_prefix_fields, ["label", "artifact_id"]],
+    [runtime.checkpoint.fields, ["summary", "timestamp"]],
+    [runtime.stage_transition.fields, [
+      "from_stage", "to_stage", "trigger", "timestamp",
+    ]],
+  ];
+  if (fixedV2Fields.some(([value, expected]) => !sameStringSet(value, expected))) {
+    return null;
+  }
+  for (const [value, required] of [
+    [runtime.lifecycle.decision_optional_fields, ["gate_ref", "gate_decision_id"]],
+    [runtime.gate.decision_optional_fields, [
+      "approval_mode", "waived_artifact_roles", "selection", "cascade",
+    ]],
+  ]) {
+    if (required.some((field) => !value.includes(field))) return null;
+  }
+  for (const [value, expected] of [
+    [runtime.lifecycle.statuses, ["active", "terminated", "completed"]],
+    [runtime.lifecycle.actions, ["terminate", "complete", "reopen"]],
+    [runtime.activation.actions, ["enable", "disable"]],
+    [runtime.gate.statuses, ["pending", "approved", "reopened"]],
+    [runtime.gate.actions, ["approve", "reopen"]],
+    [runtime.stage_transition.trigger_prefixes, [
+      "checkpoint", "gate-approve", "gate-reopen",
+    ]],
+  ]) {
+    if (!sameStringSet(value, expected)) return null;
+  }
+  return runtime;
+}
+
+function loadPolicy(runtime) {
   const candidate = path.join(
     pluginRoot(),
     "skills",
@@ -203,17 +450,199 @@ function loadPolicy() {
     "policy.yaml",
   );
   const policy = safeReadObject(candidate, MAX_POLICY_BYTES);
-  if (!policy) return null;
-  if (!Array.isArray(policy.stage_order) || !policy.stage_order.length) return null;
-  if (!Array.isArray(policy.gate_order) || !policy.gate_order.length) return null;
-  if (!policy.stages || typeof policy.stages !== "object" || Array.isArray(policy.stages)) {
-    return null;
+  if (!sameFieldSet(policy, [
+    "schema_version", "workflow_version", "workflow_graph",
+    "artifact_role_cardinality_default", "artifact_layout", "review_language",
+    "workspace_lifecycle", "authority_boundary", "gates", "stages",
+    "global_prohibited_actions", "semantic_audit",
+  ]) || !plainObject(runtime)
+    || policy.schema_version !== runtime.state_schema_version
+    || typeof policy.workflow_version !== "string" || !policy.workflow_version.trim()) return null;
+  const reviewLanguage = policy.review_language;
+  if (!sameFieldSet(reviewLanguage, [
+    "internal_review_default", "formal_output_default", "instruction",
+  ]) || Object.values(reviewLanguage).some(
+    (value) => typeof value !== "string" || !value.trim(),
+  )) return null;
+  const workspaceLifecycle = policy.workspace_lifecycle;
+  if (!sameFieldSet(workspaceLifecycle, [
+    "scope", "mainline_identity", "decision_review", "termination", "completion",
+    "terminal_access", "reopen", "inactivity", "activation", "cross_workspace_reuse",
+  ]) || Object.values(workspaceLifecycle).some(
+    (value) => typeof value !== "string" || !value.trim(),
+  )) return null;
+  if (!uniqueStringList(policy.authority_boundary)
+    || !uniqueStringList(policy.global_prohibited_actions)
+    || !uniqueStringList(policy.semantic_audit)) return null;
+  const graph = policy.workflow_graph;
+  if (!plainObject(graph)
+    || Object.keys(graph).sort().join("\0") !== [
+      "stage_exit_requirements", "stage_order", "stage_transitions",
+    ].join("\0")) return null;
+  const stageIds = graph.stage_order;
+  if (!Array.isArray(stageIds) || !stageIds.length
+    || stageIds.some((stage) => typeof stage !== "string" || !stage)
+    || new Set(stageIds).size !== stageIds.length) return null;
+  if (!plainObject(graph.stage_exit_requirements)
+    || Object.keys(graph.stage_exit_requirements).length !== stageIds.length
+    || stageIds.some((stage) => !Object.prototype.hasOwnProperty.call(
+      graph.stage_exit_requirements, stage,
+    ))) return null;
+  if (!plainObject(graph.stage_transitions)
+    || Object.keys(graph.stage_transitions).length !== stageIds.length
+    || stageIds.some((stage) => !Array.isArray(graph.stage_transitions[stage]))) return null;
+  if (!plainObject(policy.stages)
+    || Object.keys(policy.stages).length !== stageIds.length
+    || stageIds.some((stage) => !plainObject(policy.stages[stage]))) return null;
+  const stageFields = [
+    "label", "reference", "required_inputs", "allowed_actions", "required_evidence",
+    "exit_criteria", "prohibited_actions",
+  ];
+  const references = [];
+  for (const stage of stageIds) {
+    const spec = policy.stages[stage];
+    if (!sameFieldSet(spec, stageFields)
+      || typeof spec.label !== "string" || !spec.label.trim()
+      || typeof spec.reference !== "string"
+      || !/^\d{2}-[a-z0-9-]+\.md$/.test(spec.reference)
+      || stageFields.slice(2).some((field) => !uniqueStringList(spec[field]))) {
+      return null;
+    }
+    references.push(spec.reference);
   }
-  if (!policy.gates || typeof policy.gates !== "object" || Array.isArray(policy.gates)) {
-    return null;
+  if (new Set(references).size !== references.length) return null;
+  if (!plainObject(policy.gates)) return null;
+
+  const refs = [];
+  const seenRefs = new Set();
+  for (const stage of stageIds) {
+    const requirement = graph.stage_exit_requirements[stage];
+    if (requirement === null) continue;
+    if (!plainObject(requirement)
+      || !(["gate"].join("\0") === Object.keys(requirement).sort().join("\0")
+        || ["gate", "target"].join("\0") === Object.keys(requirement).sort().join("\0"))
+      || typeof requirement.gate !== "string" || !requirement.gate) return null;
+    const target = Object.prototype.hasOwnProperty.call(requirement, "target")
+      ? requirement.target : null;
+    if (target !== null && (typeof target !== "string" || !target)) return null;
+    const key = `${requirement.gate}\0${target ?? ""}`;
+    if (seenRefs.has(key)) return null;
+    seenRefs.add(key);
+    refs.push({ gate: requirement.gate, target, stage });
+  }
+  if (!refs.length) return null;
+  const gateIds = [...new Set(refs.map((reference) => reference.gate))];
+  if (Object.keys(policy.gates).length !== gateIds.length
+    || gateIds.some((gate) => !plainObject(policy.gates[gate]))) return null;
+  let retrospectiveModeCount = 0;
+  for (const gate of gateIds) {
+    const spec = policy.gates[gate];
+    if (!/^[a-z][a-z0-9_]*$/.test(gate)
+      || typeof spec.label !== "string" || !spec.label.trim()
+      || !uniqueStringList(spec.reopen_when_changed)) return null;
+    const targets = spec.approval_targets;
+    const modes = spec.approval_modes;
+    const hasTargets = Object.prototype.hasOwnProperty.call(spec, "approval_targets");
+    const hasModes = Object.prototype.hasOwnProperty.call(spec, "approval_modes");
+    if (hasTargets && hasModes) return null;
+    const ownedTargets = refs.filter((reference) => reference.gate === gate)
+      .map((reference) => reference.target);
+    let contracts;
+    if (hasTargets) {
+      if (!sameFieldSet(spec, [
+        "label", "reopen_when_changed", "approval_targets", "approval_requires",
+      ]) || !uniqueStringList(spec.approval_requires) || !plainObject(targets)) return null;
+      if (ownedTargets.some((target) => target === null)
+        || Object.keys(targets).length !== ownedTargets.length
+        || ownedTargets.some((target) => !plainObject(targets[target]))) return null;
+      for (const [target, contract] of Object.entries(targets)) {
+        const fields = plainObject(contract) ? Object.keys(contract) : [];
+        if (!/^[a-z][a-z0-9_]*$/.test(target)
+          || !fields.includes("required_artifact_roles")
+          || fields.some((field) => ![
+            "required_artifact_roles", "mutable_after_approval_roles",
+          ].includes(field))) return null;
+      }
+      contracts = Object.values(targets);
+    } else if (hasModes) {
+      if (!sameFieldSet(spec, [
+        "label", "reopen_when_changed", "approval_modes", "default_approval_mode",
+      ]) || !plainObject(modes)
+        || typeof spec.default_approval_mode !== "string"
+        || !plainObject(modes[spec.default_approval_mode])
+        || ownedTargets.length !== 1 || ownedTargets[0] !== null) return null;
+      contracts = Object.values(modes);
+      for (const [mode, contract] of Object.entries(modes)) {
+        if (!/^[a-z][a-z0-9_]*$/.test(mode) || !plainObject(contract)) return null;
+        const markers = RETROSPECTIVE_MODE_MARKERS.filter((field) => (
+          Object.prototype.hasOwnProperty.call(contract, field)
+        ));
+        const allowed = new Set([
+          "required_artifact_roles", "mutable_after_approval_roles", "approval_requires",
+          ...(markers.length ? RETROSPECTIVE_MODE_MARKERS : []),
+        ]);
+        if (!Object.prototype.hasOwnProperty.call(contract, "required_artifact_roles")
+          || !Object.prototype.hasOwnProperty.call(contract, "approval_requires")
+          || Object.keys(contract).some((field) => !allowed.has(field))
+          || !uniqueStringList(contract.approval_requires)) return null;
+        if (!markers.length) continue;
+        if (markers.length !== RETROSPECTIVE_MODE_MARKERS.length
+          || mode === spec.default_approval_mode
+          || !/^--[a-z][a-z0-9-]*$/.test(contract.cli_flag)
+          || RESERVED_GATE_CLI_FLAGS.has(contract.cli_flag)
+          || typeof contract.eligibility !== "string" || !contract.eligibility.trim()
+          || typeof contract.claim_scope !== "string" || !contract.claim_scope.trim()
+          || !uniqueStringList(contract.required_artifact_roles)
+          || !optionalUniqueStringList(contract.waivable_historical_roles)
+          || contract.waivable_historical_roles.some(
+            (role) => !artifactRoleReference(role, stageIds)
+              || contract.required_artifact_roles.includes(role),
+          )) return null;
+        retrospectiveModeCount += 1;
+      }
+    } else {
+      const expectedFields = [
+        "label", "reopen_when_changed", "required_artifact_roles", "approval_requires",
+        ...(Object.prototype.hasOwnProperty.call(spec, "selection_artifact_role")
+          ? ["selection_artifact_role"] : []),
+      ];
+      if (!sameFieldSet(spec, expectedFields)
+        || !uniqueStringList(spec.approval_requires)
+        || ownedTargets.length !== 1 || ownedTargets[0] !== null) return null;
+      contracts = [spec];
+    }
+    if (contracts.some((contract) => !validArtifactContract(contract, stageIds))) {
+      return null;
+    }
+    const selection = spec.selection_artifact_role;
+    if (selection !== undefined
+      && (hasTargets || hasModes
+        || !artifactRoleReference(selection, stageIds)
+        || !spec.required_artifact_roles.includes(selection))) return null;
+  }
+  if (retrospectiveModeCount !== 1) return null;
+  for (const source of stageIds) {
+    const destinations = new Set();
+    for (const candidate of graph.stage_transitions[source]) {
+      if (!plainObject(candidate)
+        || Object.keys(candidate).sort().join("\0") !== "to\0trigger"
+        || !stageIds.includes(candidate.to) || destinations.has(candidate.to)
+        || !plainObject(candidate.trigger)) return null;
+      destinations.add(candidate.to);
+      if (candidate.trigger.type === "checkpoint") {
+        if (Object.keys(candidate.trigger).length !== 1) return null;
+      } else if (candidate.trigger.type === "stage_exit") {
+        if (Object.keys(candidate.trigger).sort().join("\0") !== "stage\0type"
+          || !stageIds.includes(candidate.trigger.stage)
+          || graph.stage_exit_requirements[candidate.trigger.stage] === null) return null;
+      } else return null;
+    }
   }
   const artifactLayout = policy.artifact_layout;
-  if (!artifactLayout || typeof artifactLayout !== "object" || Array.isArray(artifactLayout)) {
+  if (!sameFieldSet(artifactLayout, [
+    "generated_root", "stage_path_template", "snapshot_root",
+    "snapshot_stage_path_template", "instruction",
+  ])) {
     return null;
   }
   if (typeof artifactLayout.generated_root !== "string" || !artifactLayout.generated_root) {
@@ -232,31 +661,116 @@ function loadPolicy() {
     || !artifactLayout.instruction.includes(artifactLayout.stage_path_template)) {
     return null;
   }
-  const stageIds = policy.stage_order.filter((item) => typeof item === "string" && item);
-  const gateIds = policy.gate_order.filter((item) => typeof item === "string" && item);
-  if (stageIds.length !== policy.stage_order.length || new Set(stageIds).size !== stageIds.length) {
+  if (typeof artifactLayout.snapshot_root !== "string" || !artifactLayout.snapshot_root) {
     return null;
   }
-  if (gateIds.length !== policy.gate_order.length || new Set(gateIds).size !== gateIds.length) {
+  const snapshotRootParts = artifactLayout.snapshot_root.split("/");
+  if (snapshotRootParts[0] !== ".research"
+    || snapshotRootParts.some((part) => !part || part === "." || part === "..")) {
     return null;
   }
-  if (stageIds.some((stage) => !policy.stages[stage])) return null;
-  if (gateIds.some((gate) => !policy.gates[gate])) return null;
-  const contract = policy.state_contract;
-  if (!contract || typeof contract !== "object" || Array.isArray(contract)) return null;
-  const exactArray = (value, expected) => Array.isArray(value)
-    && value.length === expected.length
-    && value.every((item, index) => item === expected[index]);
-  if (!exactArray(contract.required_fields, REQUIRED_STATE_FIELDS)) return null;
-  if (!exactArray(contract.stage_ids, stageIds)) return null;
-  if (!exactArray(contract.gate_ids, gateIds)) return null;
-  if (!exactArray(contract.gate_statuses, ["pending", "approved", "reopened"])) return null;
-  if (!exactArray(contract.gate_actions, ["approve", "reopen"])) return null;
-  if (!exactArray(
-    contract.artifact_pointer_fields,
-    ["path", "artifact_id", "version", "content_hash", "status"],
-  )) return null;
+  const generatedRoot = artifactLayout.generated_root.replace(/\/+$/, "");
+  const configuredSnapshotRoot = artifactLayout.snapshot_root.replace(/\/+$/, "");
+  if (generatedRoot === configuredSnapshotRoot
+    || generatedRoot.startsWith(`${configuredSnapshotRoot}/`)
+    || configuredSnapshotRoot.startsWith(`${generatedRoot}/`)) return null;
+  if (typeof artifactLayout.snapshot_stage_path_template !== "string"
+    || artifactLayout.snapshot_stage_path_template !== `${artifactLayout.snapshot_root}/<stage-id>`) {
+    return null;
+  }
+  if (policy.artifact_role_cardinality_default !== "one") return null;
+  const releaseGates = gateIds.filter((gate) => {
+    const spec = policy.gates[gate];
+    return plainObject(spec) && plainObject(spec.approval_targets);
+  });
+  if (releaseGates.length !== 1) return null;
   return policy;
+}
+
+function stageOrder(policy) {
+  return policy.workflow_graph.stage_order;
+}
+
+function approvalSequence(policy) {
+  return stageOrder(policy).flatMap((stage) => {
+    const requirement = policy.workflow_graph.stage_exit_requirements[stage];
+    return plainObject(requirement)
+      ? [{ gate: requirement.gate, target: requirement.target ?? null, stage }]
+      : [];
+  });
+}
+
+function gateOrder(policy) {
+  return [...new Set(approvalSequence(policy).map((reference) => reference.gate))];
+}
+
+function approvalTargets(policy, gate) {
+  return approvalSequence(policy)
+    .filter((reference) => reference.gate === gate && reference.target !== null)
+    .map((reference) => reference.target);
+}
+
+function gateRefKey(gate, target = null) {
+  return `${gate}\0${target ?? ""}`;
+}
+
+function gateRefObject(gate, target = null) {
+  return target === null ? { gate } : { gate, target };
+}
+
+function parseGateRef(policy, runtime, value) {
+  const keys = plainObject(value) ? Object.keys(value) : [];
+  const required = runtime.gate.gate_ref_required_fields;
+  const optional = runtime.gate.gate_ref_optional_fields;
+  if (!plainObject(value)
+    || required.some((field) => !keys.includes(field))
+    || keys.some((field) => !required.includes(field) && !optional.includes(field))) return null;
+  const target = Object.prototype.hasOwnProperty.call(value, "target") ? value.target : null;
+  return approvalSequence(policy).find(
+    (reference) => reference.gate === value.gate && reference.target === target,
+  ) || null;
+}
+
+function stageExitRequirement(policy, stage) {
+  const value = policy.workflow_graph.stage_exit_requirements[stage];
+  return plainObject(value) ? { gate: value.gate, target: value.target ?? null, stage } : null;
+}
+
+function gateRefOwner(policy, gate, target = null) {
+  return approvalSequence(policy).find(
+    (reference) => reference.gate === gate && reference.target === target,
+  ) || null;
+}
+
+function transitionRule(policy, fromStage, toStage) {
+  const candidates = policy.workflow_graph.stage_transitions[fromStage];
+  return Array.isArray(candidates)
+    ? candidates.find((candidate) => candidate.to === toStage) || null
+    : null;
+}
+
+function transitionGateRef(policy, fromStage, toStage) {
+  const rule = transitionRule(policy, fromStage, toStage);
+  if (!plainObject(rule) || !plainObject(rule.trigger)
+    || rule.trigger.type !== "stage_exit") return null;
+  return stageExitRequirement(policy, rule.trigger.stage);
+}
+
+function gateRecord(state, policy, gate, target = null) {
+  const container = plainObject(state.gates) ? state.gates[gate] : null;
+  const targets = approvalTargets(policy, gate);
+  if (targets.length) {
+    return plainObject(container) && plainObject(container.targets)
+      ? container.targets[target] : null;
+  }
+  return target === null && plainObject(container) ? container : null;
+}
+
+function allGateRecords(state, policy) {
+  return approvalSequence(policy).map((reference) => ({
+    ...reference,
+    record: gateRecord(state, policy, reference.gate, reference.target),
+  }));
 }
 
 function activeProject(input) {
@@ -267,14 +781,15 @@ function activeProject(input) {
   const statePath = path.join(root, ".research", "state.json");
   const state = safeReadObject(statePath, MAX_STATE_BYTES);
   if (!state || state.enabled !== true) return null;
-  const policy = loadPolicy();
-  if (!policy) return null;
+  const runtime = loadRuntimeContract();
+  const policy = loadPolicy(runtime);
   return {
     root,
     statePath,
     memoryPath: path.join(root, ".research", "memory.md"),
     state,
     policy,
+    runtime,
   };
 }
 
@@ -285,10 +800,41 @@ function stageSpec(context) {
   return spec && typeof spec === "object" && !Array.isArray(spec) ? spec : null;
 }
 
-function gateStatus(context, gateId) {
-  const gates = context.state.gates;
-  const record = gates && typeof gates === "object" ? gates[gateId] : null;
+function gateStatus(context, gateId, target = null) {
+  const record = gateRecord(context.state, context.policy, gateId, target);
   return record && typeof record === "object" ? record.status : null;
+}
+
+function gateForRequirement(policy, requirement) {
+  if (requirement === "external_submission") return releaseGateId(policy);
+  const references = [];
+  for (const source of stageOrder(policy)) {
+    for (const candidate of policy.workflow_graph.stage_transitions[source]) {
+      if (candidate.to !== requirement) continue;
+      const reference = transitionGateRef(policy, source, candidate.to);
+      if (reference) references.push(reference);
+    }
+  }
+  const gates = [...new Set(references.map((reference) => reference.gate))];
+  return gates.length === 1 ? gates[0] : null;
+}
+
+function releaseGateId(policy) {
+  const matches = gateOrder(policy).filter((gate) => {
+    const spec = policy.gates[gate];
+    return plainObject(spec) && plainObject(spec.approval_targets);
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function initialReleaseTarget(policy) {
+  const gate = releaseGateId(policy);
+  const targets = gate ? approvalTargets(policy, gate) : [];
+  return targets.length ? targets[0] : null;
+}
+
+function isReleaseGate(policy, gate) {
+  return gate === releaseGateId(policy);
 }
 
 function listLines(values, fallback = "- none declared") {
@@ -301,93 +847,14 @@ function listLines(values, fallback = "- none declared") {
 }
 
 function sessionContext(context) {
-  const spec = stageSpec(context);
-  const stage = scalar(context.state.current_stage, "invalid");
-  const label = spec ? scalar(spec.label, "unlabeled") : "unknown stage";
-  const gate = spec && typeof spec.gate_to_exit === "string" ? spec.gate_to_exit : null;
   return bounded([
     "[SCIENTIFIC RESEARCH WORKFLOW — ACTIVE PROJECT]",
     `Project: ${scalar(context.state.project_name, path.basename(context.root))}`,
     `Project ID: ${scalar(context.state.project_id)}`,
-    `Current stage: ${stage} — ${label}`,
-    `Gate to exit: ${gate ? `${gate} (${scalar(gateStatus(context, gate), "missing")})` : "none"}`,
-    ".research/state.json is the project state authority. Never infer Gate approval or edit Gate state directly.",
-    "Research-relevant prompts receive the current-stage boundary separately. Mechanical Hook checks remain active for supported tool calls, but cannot guarantee scientific correctness or universal interception.",
+    `Lifecycle: ${scalar(plainObject(context.state.lifecycle) ? context.state.lifecycle.status : null, "invalid")}`,
+    "Workflow activation: .research/state.json exists and enabled=true.",
+    ".research/state.json is authoritative for project state; policy.yaml governs workflow and Gates; runtime-contract.json governs machine structure.",
   ].join("\n"), MAX_SESSION_CONTEXT_CHARS);
-}
-
-const CODE_PROMPT_PATTERNS = [
-  /\b(?:refactor|debug|troubleshoot|fix|simplify|clean\s+up|format|rename|optimi[sz]e|improve|explain|inspect|review|understand|walk\s+through|analy[sz]e)\b[\s\S]{0,100}\b(?:bug|error|code|function|class|method|module|api|loop|variable|script|parser|loader|reader|processor|calculation|implementation|runtime|control\s+flow|stack\s+trace|[\w.-]+\.(?:py|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|rs|go|rb|php|swift|kt|sh))\b/i,
-  /\b(?:bug|error|code|function|class|method|module|api|loop|variable|script|parser|loader|reader|processor|calculation|implementation|runtime|control\s+flow|stack\s+trace|[\w.-]+\.(?:py|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|rs|go|rb|php|swift|kt|sh))\b[\s\S]{0,100}\b(?:refactor|debug|troubleshoot|fix|simplify|clean\s+up|format|rename|optimi[sz]e|improve|explain|inspect|review|understand|walk\s+through|analy[sz]e|work|mean|detail|why|how|problem)\b/i,
-  /\b(?:run|add|write|fix|update)\b[\s\S]{0,40}\b(?:unit|integration)?\s*tests?\b/i,
-  /\b(?:why\s+does|investigate|debug|fix|explain)\b[\s\S]{0,60}\b(?:test|ci|build)\b[\s\S]{0,30}\b(?:fail|failing|failure|break)/i,
-  /\b(?:investigate|debug|fix|explain)?[\s\S]{0,20}\b(?:failing|failed|broken)\b[\s\S]{0,30}\b(?:test|ci|build)\b/i,
-  /\b(?:run|fix|check)\b[\s\S]{0,40}\b(?:lint|typecheck|type-check|formatter|static\s+analysis)\b/i,
-  /\bwhat\s+(?:does|is)\b[\s\S]{0,30}\b(?:function|class|method|module)\b[\s\S]{0,20}\b(?:do|for)\b/i,
-  /\b(?:review|explain|inspect)\b[\s\S]{0,30}\b(?:git\s+diff|patch|regex|regular\s+expression)\b/i,
-  /\b(?:simplify|optimi[sz]e|explain|review)\b[\s\S]{0,40}\b(?:sql\s+query|query)\b/i,
-  /\b(?:why\s+(?:does|did)|fix|debug|explain)\b[\s\S]{0,30}\b(?:pytest|unit\s*tests?|ci)\b[\s\S]{0,20}\b(?:fail|failing|failed|error)?/i,
-  /(?:重构|调试|排查|修复|简化|整理|格式化|重命名|优化|解释|分析|讲解|检查|理解|看看)[^。！？\n]{0,60}(?:代码|函数|类|接口|模块|循环|变量|脚本|算法实现|代码实现|代码逻辑|控制流|报错|错误|单元测试|[\w.-]+\.(?:py|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|rs|go|rb|php|swift|kt|sh))/,
-  /(?:代码|函数|类|接口|模块|循环|变量|脚本|算法实现|代码实现|代码逻辑|控制流|报错|错误|单元测试|[\w.-]+\.(?:py|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|rs|go|rb|php|swift|kt|sh))[^。！？\n]{0,60}(?:重构|调试|排查|修复|简化|整理|格式化|重命名|优化|解释|分析|讲解|检查|理解|为什么|怎么|如何|细节|问题|作用)/,
-  /(?:代码优化|优化代码|代码细节|代码逻辑|单元测试|测试代码|运行测试|补充测试)/,
-  /(?:为什么|为何|怎么|如何)[^。！？\n]{0,30}(?:测试|CI|构建)[^。！？\n]{0,20}(?:失败|报错|不通过)/,
-];
-
-const WORKFLOW_PROMPT_PATTERNS = [
-  /\b(?:release\s+gate|researchctl|artifact\s+(?:register|registry)|research\s+(?:stage|gate)|current\s+stage)\b|\.research[\\/](?:state\.json|memory\.md)/i,
-  /\b(?:idea[_ -]?freeze|method[_ -]?experiment[_ -]?approval|claim[_ -]?freeze)\b/i,
-  /(?:科研|研究)(?:阶段|门禁)|(?:想法|方法|主张|声明)(?:冻结|批准)|(?:门禁|闸门)(?:状态|批准|重开)|(?:登记|注册)科研产物/,
-];
-
-const RESEARCH_DELIVERABLE_PATTERN = /\b(?:write|draft|revise|edit|verify|check|audit|prepare|submit|publish|send|respond|address|search|cite|compare|summari[sz]e|synthesi[sz]e|judge|evaluate)\b[\s\S]{0,100}\b(?:literature|prior\s+work|citation|manuscript|paper|rebuttal|reviewer|submission|research\s+claim|scientific\s+evidence|finding|conclusion)\b/i;
-const CHINESE_RESEARCH_DELIVERABLE_PATTERN = /(?:撰写|起草|修改|润色|核验|检查|审计|准备|投稿|发布|发送|回复|回应|检索|引用|比较|总结|梳理|判断|评价)[^。！？\n]{0,60}(?:文献|相关工作|引用|论文|稿件|返修|审稿|回复信|投稿|科研主张|科研证据|研究发现|研究结论)/;
-const RESEARCH_ACTION_PATTERN = /\b(?:verify|validate|analy[sz]e|interpret|compare|report|assess|prove|support|conclude|audit|freeze|summari[sz]e|synthesi[sz]e|judge|evaluate|improve|increase|reduce|maximi[sz]e)\b/i;
-const RESEARCH_OBJECT_PATTERN = /\b(?:experiment|evaluation|training)\s+(?:result|output|finding)s?\b|\b(?:metric|accuracy|precision|recall|baseline|ablation|claim|novelty|scientific\s+evidence|hypoth(?:esis|eses))\b/i;
-const PERFORMANCE_ACTION_PATTERN = /\b(?:verify|validate|compare|report|assess|improve|increase|reduce|maximi[sz]e)\b/i;
-const PERFORMANCE_METRIC_PATTERN = /\b(?:F1|f1|mAP|AUC|IoU|Dice)\b/;
-const STATISTICAL_RESEARCH_PATTERN = /\b(?:hypothesis|statistical|significance)\s+tests?\b|\bp[- ]?values?\b|\bconfidence\s+intervals?\b/i;
-const RESEARCH_EXECUTION_PATTERN = /\b(?:run|launch|execute|start)\s+(?:the\s+)?(?:(?:approved|registered|full|new|next)\s+)?(?:experiment|training|benchmark|evaluation)s?\b(?!\s+(?:script|code|runner|pipeline|test))/i;
-const CHINESE_RESEARCH_ACTION_PATTERN = /(?:验证|核验|分析|解释结果|解读|比较|汇报|评估|论证|证明|支持|下结论|审计|冻结|总结|梳理|判断|评价|提升|提高|降低|减少)/;
-const CHINESE_RESEARCH_OBJECT_PATTERN = /(?:实验结果|实验输出|训练结果|评估结果|结果指标|准确率|精确率|召回率|基线|消融|科研主张|创新性|新颖性|科研证据|研究假设)/;
-const CHINESE_RESEARCH_EXECUTION_PATTERN = /(?:运行|启动|执行|开始)(?:已批准的|已登记的|完整的|新的|下一轮)?(?:实验|训练|基准测试|评估)(?!脚本|代码|程序|测试)/;
-
-const RESEARCH_OBJECT_CODE_PATTERN = /\b(?:experiment|evaluation|training)\s+(?:result|output|finding)s?\s+(?:parser|loader|reader|processor|function|class|module|script|code|implementation)\b/i;
-const CHINESE_RESEARCH_OBJECT_CODE_PATTERN = /(?:实验结果|实验输出|训练结果|评估结果)(?:解析|处理|读取|加载)(?:器|函数|类|模块|脚本|代码|实现)?/;
-const METRIC_CODE_PATTERN = /\b(?:accuracy|precision|recall|F1|f1|mAP|AUC|IoU|Dice|loss|metric)\s+(?:calculation|calculator|function|parser|code|implementation)\b/i;
-
-function hasStrongResearchIntent(prompt, codeIntent) {
-  if (WORKFLOW_PROMPT_PATTERNS.some((pattern) => pattern.test(prompt))) return true;
-  if (STATISTICAL_RESEARCH_PATTERN.test(prompt)) return true;
-  if (RESEARCH_DELIVERABLE_PATTERN.test(prompt) || CHINESE_RESEARCH_DELIVERABLE_PATTERN.test(prompt)) {
-    return true;
-  }
-  if (RESEARCH_EXECUTION_PATTERN.test(prompt) || CHINESE_RESEARCH_EXECUTION_PATTERN.test(prompt)) {
-    return true;
-  }
-  if (codeIntent && (
-    RESEARCH_OBJECT_CODE_PATTERN.test(prompt)
-    || CHINESE_RESEARCH_OBJECT_CODE_PATTERN.test(prompt)
-    || METRIC_CODE_PATTERN.test(prompt)
-  )) {
-    const remainder = prompt
-      .replace(RESEARCH_OBJECT_CODE_PATTERN, " ")
-      .replace(CHINESE_RESEARCH_OBJECT_CODE_PATTERN, " ")
-      .replace(METRIC_CODE_PATTERN, " ");
-    return (RESEARCH_ACTION_PATTERN.test(remainder) && RESEARCH_OBJECT_PATTERN.test(remainder))
-      || (PERFORMANCE_ACTION_PATTERN.test(remainder) && PERFORMANCE_METRIC_PATTERN.test(remainder))
-      || (CHINESE_RESEARCH_ACTION_PATTERN.test(remainder) && CHINESE_RESEARCH_OBJECT_PATTERN.test(remainder));
-  }
-  return (RESEARCH_ACTION_PATTERN.test(prompt) && RESEARCH_OBJECT_PATTERN.test(prompt))
-    || (PERFORMANCE_ACTION_PATTERN.test(prompt) && PERFORMANCE_METRIC_PATTERN.test(prompt))
-    || (CHINESE_RESEARCH_ACTION_PATTERN.test(prompt) && CHINESE_RESEARCH_OBJECT_PATTERN.test(prompt));
-}
-
-function clearlyCodeOnlyPrompt(input) {
-  const prompt = userPrompt(input).trim();
-  if (!prompt) return false;
-  const codeIntent = CODE_PROMPT_PATTERNS.some((pattern) => pattern.test(prompt));
-  if (!codeIntent) return false;
-  return !hasStrongResearchIntent(prompt, codeIntent);
 }
 
 function promptContext(context) {
@@ -399,23 +866,12 @@ function promptContext(context) {
       `Current stage ${stage} is not defined by the canonical policy. Run researchctl doctor before staged work.`,
     ].join("\n"), MAX_PROMPT_CONTEXT_CHARS);
   }
-  const gate = typeof spec.gate_to_exit === "string" ? spec.gate_to_exit : null;
-  const auditItems = Array.isArray(context.policy.semantic_audit)
-    ? context.policy.semantic_audit
-    : [];
+  const exit = stageExitRequirement(context.policy, stage);
   return bounded([
-    "[RESEARCH WORKFLOW — PROMPT RELEVANT]",
+    "[RESEARCH WORKFLOW — CURRENT STATE]",
+    `Lifecycle: ${scalar(plainObject(context.state.lifecycle) ? context.state.lifecycle.status : null, "invalid")}`,
     `Current stage: ${stage} — ${scalar(spec.label, "unlabeled")}`,
-    `Gate to exit: ${gate ? `${gate} (${scalar(gateStatus(context, gate), "missing")})` : "none"}`,
-    "Current-stage prohibited actions:",
-    listLines(spec.prohibited_actions),
-    "",
-    `Artifact layout: ${scalar(context.policy.artifact_layout.instruction)}`,
-    "Use the $research Skill, follow policy.yaml review_language, and load only the current-stage reference. policy.yaml is authoritative for evidence, Gate, and exit criteria.",
-    "",
-    "Before the first user-facing final answer, silently apply the canonical semantic audit below. Integrate any necessary correction into one complete, self-contained answer. Do not emit a standalone audit addendum, `[Stop Hook Review]`, or private chain-of-thought.",
-    "Canonical semantic audit:",
-    listLines(auditItems),
+    `Gate to exit: ${exit ? `${exit.gate}${exit.target ? `/${exit.target}` : ""} (${scalar(gateStatus(context, exit.gate, exit.target), "missing")})` : "none"}`,
   ].join("\n"), MAX_PROMPT_CONTEXT_CHARS);
 }
 
@@ -905,20 +1361,26 @@ function recursiveForcedRemoval(command) {
   return false;
 }
 
+function gitCommandParts(tokens) {
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (["-C", "-c", "--git-dir", "--work-tree", "--config-env"].includes(token)) index += 2;
+    else if (/^--(?:git-dir|work-tree)=/.test(token)) index += 1;
+    else if (/^--(?:no-pager|paginate|bare|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)$/.test(token)) index += 1;
+    else break;
+  }
+  return {
+    subcommand: (tokens[index] || "").toLowerCase(),
+    args: tokens.slice(index + 1),
+  };
+}
+
 function destructiveGitCommand(command) {
   for (const segment of expandedShellSegments(command)) {
     const tokens = commandTokens(segment);
     if (path.basename(tokens[0] || "").toLowerCase() !== "git") continue;
-    let index = 1;
-    while (index < tokens.length) {
-      const token = tokens[index];
-      if (["-C", "-c", "--git-dir", "--work-tree", "--config-env"].includes(token)) index += 2;
-      else if (/^--(?:git-dir|work-tree)=/.test(token)) index += 1;
-      else if (/^--(?:no-pager|paginate|bare|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)$/.test(token)) index += 1;
-      else break;
-    }
-    const subcommand = (tokens[index] || "").toLowerCase();
-    const args = tokens.slice(index + 1);
+    const { subcommand, args } = gitCommandParts(tokens);
     if (subcommand === "reset" && args.includes("--hard")) return "git reset --hard";
     if (subcommand === "checkout") {
       const destructiveOption = args.some((token) => ["--ours", "--theirs", "-f", "--force"].includes(token));
@@ -958,7 +1420,88 @@ function dangerousShellReason(command) {
 
 function isResearchCtlCommand(command) {
   if (!/(?:^|[\s"'/])researchctl(?:\.py)?(?:["'\s]|$)/i.test(command)) return false;
-  return /\b(?:init|status|enable|disable|artifact|gate|checkpoint|doctor)\b/i.test(command);
+  return /\b(?:init|status|enable|disable|artifact|gate|lifecycle|checkpoint|dashboard|doctor)\b/i.test(command);
+}
+
+function researchCtlArguments(segment) {
+  const tokens = commandTokens(segment);
+  const index = tokens.findIndex(
+    (token) => /^(?:researchctl|researchctl\.py)$/i.test(path.basename(token)),
+  );
+  return index >= 0 ? tokens.slice(index + 1) : null;
+}
+
+function terminalResearchCtlAllowed(args) {
+  if (!Array.isArray(args) || !args.length) return false;
+  if (["status", "doctor", "dashboard", "disable"].includes(args[0])) return true;
+  return args[0] === "lifecycle" && args[1] === "reopen";
+}
+
+function terminalShellAllowed(command) {
+  if (/(?:\$\(|`|[<>=]\()/.test(command)) return false;
+  const readOnly = new Set([
+    "cat", "head", "tail", "less", "more", "stat", "ls", "rg", "grep",
+    "wc", "pwd", "test", "true", "jq", "diff", "shasum", "sha256sum",
+    "md5sum", "file", "du", "realpath", "readlink",
+  ]);
+  const segments = expandedShellSegments(command);
+  return segments.length > 0 && segments.every((segment) => {
+    if (/(?:>>?|\btee\b|\bsponge\b|\btruncate\b|\btouch\b|\brm\b|\bmv\b|\bcp\b)/i.test(segment)) {
+      return false;
+    }
+    const researchArgs = researchCtlArguments(segment);
+    if (researchArgs !== null) return terminalResearchCtlAllowed(researchArgs);
+    const tokens = commandTokens(segment);
+    const executable = path.basename(tokens[0] || "").toLowerCase();
+    if (readOnly.has(executable)) {
+      return executable !== "jq" || !tokens.includes("--in-place");
+    }
+    if (executable === "sed") {
+      return tokens[1] === "-n"
+        && /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(tokens[2] || "")
+        && tokens.length >= 4;
+    }
+    if (executable === "find") {
+      const mutatingActions = new Set([
+        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+        "-fprintf", "-fls",
+      ]);
+      return !tokens.some((token) => mutatingActions.has(token));
+    }
+    if (executable !== "git") return false;
+    return ["status", "diff", "log", "show"].includes(
+      gitCommandParts(tokens).subcommand,
+    );
+  });
+}
+
+function terminalResearchCtlToolAllowed(toolName, toolInput) {
+  if (!/(?:^|[:._-])researchctl(?:$|[:._-])/i.test(toolName)) return null;
+  const normalized = toolName.toLowerCase().replaceAll("_", "-");
+  if (/(?:status|doctor|dashboard|disable)/.test(normalized)) return true;
+  const action = plainObject(toolInput)
+    ? firstDefined(toolInput, ["action", "lifecycle_action", "lifecycleAction"])
+    : null;
+  return /lifecycle/.test(normalized) && action === "reopen";
+}
+
+function terminalLifecyclePreToolUse(context, input) {
+  const lifecycle = context.state.lifecycle;
+  const status = plainObject(lifecycle) ? lifecycle.status : null;
+  if (status === "active") return null;
+  const toolName = getToolName(input);
+  const toolInput = getToolInput(input);
+  const command = cleanText(commandText(toolInput));
+  if (isShellTool(toolName) && terminalShellAllowed(command)) return {};
+  const researchCtlAllowed = terminalResearchCtlToolAllowed(toolName, toolInput);
+  if (researchCtlAllowed === true) return {};
+  const readOnlyRetrievalTool = /(?:^|[:._-])web(?:[:._-]+)run$/i.test(toolName);
+  if (readOnlyRetrievalTool) return {};
+  const readTool = /(?:^|[:._-])(read|get|list|search|view)(?:$|[:._-])/i.test(toolName);
+  if (readTool && researchCtlAllowed === null) return {};
+  return deny(
+    `Project lifecycle is ${JSON.stringify(status)}. Terminal or invalid lifecycle state permits only read/audit tools, status --json or Dashboard export, researchctl disable, and explicit researchctl lifecycle reopen.`,
+  );
 }
 
 function shellStateMutation(command) {
@@ -967,13 +1510,9 @@ function shellStateMutation(command) {
   while (leadingDirectoryChange.test(effective)) {
     effective = effective.replace(leadingDirectoryChange, "");
   }
-  const readOnly = /^\s*(?:cat|head|tail|less|more|stat|ls|rg|grep|jq\b(?![\s\S]*(?:>|--in-place))|sed\s+-n\b|test\b)/i;
+  const readOnly = /^\s*(?:cat|head|tail|less|more|stat|ls|rg|grep|wc|shasum|sha256sum|md5sum|file|du|realpath|readlink|jq\b(?![\s\S]*(?:>|--in-place))|sed\s+-n\b|test\b)/i;
   return !readOnly.test(effective)
     || /(?:>>?|\btee\b|\bsponge\b|\btruncate\b|\brm\b|\bmv\b|\bcp\b|\btouch\b|\bsed\b[\s\S]*\s-i\b|\bwriteFile|\bwrite_text|\bjson\.dump\b)/i.test(effective);
-}
-
-function gateBlocked(context, gate) {
-  return context.policy.gate_order.includes(gate) && gateStatus(context, gate) !== "approved";
 }
 
 function pythonLaunchesExperiment(command) {
@@ -1074,36 +1613,51 @@ function explicitExperimentLaunch(toolName, command, text) {
 function registeredManuscriptPaths(context) {
   const results = [];
   const artifacts = context.state && context.state.artifacts;
-  const roles = [
-    ["paper", "manuscript"],
-    ["revision", "revised_manuscript"],
-    ["revision", "response_document"],
-  ];
+  const releaseId = releaseGateId(context.policy);
+  const releaseSpec = releaseId && context.policy.gates[releaseId];
+  const mapping = releaseSpec && releaseSpec.approval_targets;
+  const roles = [...new Set(
+    plainObject(mapping)
+      ? Object.values(mapping).flatMap((contract) => (
+        plainObject(contract) && Array.isArray(contract.required_artifact_roles)
+          ? contract.required_artifact_roles : []
+      )).filter((role) => (
+        typeof role === "string" && /(?:^|\.)(?:[a-z0-9_]*manuscript|response_document)$/.test(role)
+      ))
+      : [],
+  )].map((role) => role.split(".", 2));
   for (const [stage, role] of roles) {
     const stageBucket = artifacts && typeof artifacts === "object" ? artifacts[stage] : null;
     const roleBucket = stageBucket && typeof stageBucket === "object" ? stageBucket[role] : null;
     if (!roleBucket || typeof roleBucket !== "object") continue;
-    for (const pointer of Object.values(roleBucket)) {
-      if (pointer && typeof pointer === "object" && typeof pointer.path === "string") {
-        results.push(pointer.path.replace(/\\/g, "/"));
+    for (const entry of Object.values(roleBucket)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)
+        || !Array.isArray(entry.revisions)) continue;
+      const revision = entry.revisions.find((item) => (
+        item && typeof item === "object" && item.revision === entry.current_revision
+      ));
+      if (revision && typeof revision.source_path === "string") {
+        results.push(revision.source_path.replace(/\\/g, "/"));
       }
     }
   }
   return results;
 }
 
-function manuscriptMutation(context, toolName, toolInput, text) {
+function mutationTargetsPaths(context, toolName, toolInput, text, registered, knownTarget = null) {
   if (!(isMutatingTool(toolName) || isShellTool(toolName))) return false;
-  const knownTarget = /(?:^|[\/])(?:main|paper|manuscript|appendix|supplement|respond|response|rebuttal|cover[_-]?letter)\.(?:tex|md|docx)$/i;
-  const registered = registeredManuscriptPaths(context);
   const registeredAbsolute = registered.map((stored) => path.resolve(context.root, stored));
   const isTarget = (candidate) => {
     if (typeof candidate !== "string" || !candidate.trim()) return false;
     const normalized = candidate.replace(/^['"]|['"]$/g, "").replace(/\\/g, "/");
-    if (knownTarget.test(normalized)) return true;
+    if (knownTarget && knownTarget.test(normalized)) return true;
     return registered.some((stored) => (
       normalized === stored
       || path.resolve(context.root, normalized) === path.resolve(context.root, stored)
+      || sameExistingFile(
+        path.resolve(context.root, normalized),
+        path.resolve(context.root, stored),
+      )
     ));
   };
   const isTargetOrContainer = (candidate) => {
@@ -1128,7 +1682,7 @@ function manuscriptMutation(context, toolName, toolInput, text) {
     }
     if (/(?:^|[:._-])(?:delete|remove|move|rename)(?:$|[:._-])/i.test(toolName)
       && paths.some(isTargetOrContainer)) return true;
-    return paths.length ? paths.some(isTarget) : knownTarget.test(text);
+    return paths.length ? paths.some(isTarget) : Boolean(knownTarget && knownTarget.test(text));
   }
   for (const segment of expandedShellSegments(text)) {
     const tokens = commandTokens(segment);
@@ -1151,6 +1705,38 @@ function manuscriptMutation(context, toolName, toolInput, text) {
     }
   }
   return false;
+}
+
+function manuscriptMutation(context, toolName, toolInput, text) {
+  const knownTarget = /(?:^|[\/])(?:main|paper|manuscript|appendix|supplement|respond|response|rebuttal|cover[_-]?letter)\.(?:tex|md|docx)$/i;
+  return mutationTargetsPaths(
+    context, toolName, toolInput, text, registeredManuscriptPaths(context), knownTarget,
+  );
+}
+
+function approvedReleaseBindingMutation(context, releaseGate, toolName, toolInput, text) {
+  if (!releaseGate) return null;
+  for (const target of approvalTargets(context.policy, releaseGate)) {
+    const record = gateRecord(context.state, context.policy, releaseGate, target);
+    if (!plainObject(record) || record.status !== "approved") continue;
+    const approval = latestApprovalDecision(record);
+    if (!plainObject(approval) || !Array.isArray(approval.artifact_refs)) continue;
+    const mutableRoles = mutableAfterApprovalRoles(
+      context.policy, releaseGate, target, approval,
+    );
+    const boundPaths = approval.artifact_refs.filter((reference) => {
+      const role = referenceRole(reference);
+      return typeof role === "string"
+        && !mutableRoles.has(role);
+    }).map((reference) => reference.source_path).filter(
+      (sourcePath) => typeof sourcePath === "string" && sourcePath.trim(),
+    );
+    if (boundPaths.length
+      && mutationTargetsPaths(context, toolName, toolInput, text, boundPaths)) {
+      return { gate: releaseGate, target };
+    }
+  }
+  return null;
 }
 
 function submissionDestination(value) {
@@ -1208,6 +1794,31 @@ function externalReleaseAction(toolName, command, text) {
   return (action || submissionTransfer) && subject;
 }
 
+function mechanicallyRequestedReleaseTarget(policy, gate, text) {
+  const references = gate ? approvalSequence(policy).filter(
+    (reference) => reference.gate === gate && reference.target !== null,
+  ) : [];
+  const targets = references.map((reference) => reference.target);
+  const namedTargets = targets.filter((target) => {
+    const variants = [target, target.replaceAll("_", " "), target.replaceAll("_", "-")];
+    return variants.some((variant) => text.toLowerCase().includes(variant.toLowerCase()));
+  });
+  if (namedTargets.length) {
+    return { directed: true, target: namedTargets.length === 1 ? namedTargets[0] : null };
+  }
+  if (/\b(?:initial|first|new)[_ -]?(?:manuscript[_ -]?)?submission\b|(?:首次|初次)投稿/i.test(text)) {
+    return { directed: true, target: targets[0] ?? null };
+  }
+  if (/\b(?:rebuttal|reviewer[_ -]?response|response[_ -]?document|revis(?:ed|ion))\b|(?:审稿回复|返修回复|修订稿)/i.test(text)) {
+    const downstream = references.slice(1);
+    return {
+      directed: true,
+      target: downstream.length === 1 ? downstream[0].target : null,
+    };
+  }
+  return { directed: false, target: null };
+}
+
 function deny(reason) {
   return {
     hookSpecificOutput: {
@@ -1227,7 +1838,7 @@ function preToolUse(context, input) {
   if (isShellTool(toolName)) {
     const dangerous = dangerousShellReason(command);
     if (dangerous) {
-      return deny(`Blocked mechanically detectable dangerous operation (${dangerous}). Use a narrower reversible command or obtain explicit authority. Hook coverage is limited to this intercepted tool call.`);
+      return deny(`Blocked mechanically detectable dangerous operation (${dangerous}). Use a narrower reversible command. Hook coverage is limited to this intercepted tool call.`);
     }
   }
 
@@ -1241,26 +1852,82 @@ function preToolUse(context, input) {
     }
   }
 
-  if (
-    gateBlocked(context, "method_experiment_approval")
-    && explicitExperimentLaunch(toolName, command, text)
-  ) {
-    return deny("This is an explicit experiment, training, cluster, or hardware launch, but method_experiment_approval is not approved. Prepare the method and experiment contract, then record human approval through researchctl.");
+  const lifecycleDecision = terminalLifecyclePreToolUse(context, input);
+  if (lifecycleDecision !== null) return lifecycleDecision;
+
+  const launchesExperiment = explicitExperimentLaunch(toolName, command, text);
+  const mutatesManuscript = manuscriptMutation(context, toolName, toolInput, text);
+  const releasesExternally = externalReleaseAction(toolName, command, text);
+  const releaseGate = releaseGateId(context.policy);
+  const releaseBinding = approvedReleaseBindingMutation(
+    context, releaseGate, toolName, toolInput, text,
+  );
+  if (!(launchesExperiment || mutatesManuscript || releasesExternally || releaseBinding)) return {};
+
+  const experimentGate = gateForRequirement(context.policy, "experiment_results");
+  const manuscriptGate = gateForRequirement(context.policy, "paper");
+  const requestedRelease = releasesExternally
+    ? mechanicallyRequestedReleaseTarget(context.policy, releaseGate, text)
+    : { directed: false, target: null };
+  const currentExit = stageExitRequirement(
+    context.policy, context.state.current_stage,
+  );
+  const activeReleaseTarget = currentExit && currentExit.gate === releaseGate
+    ? currentExit.target : null;
+  const releaseTarget = requestedRelease.directed
+    ? requestedRelease.target : activeReleaseTarget;
+  const integrityGates = [];
+  if (launchesExperiment && experimentGate) integrityGates.push({ gate: experimentGate });
+  if (mutatesManuscript && manuscriptGate) integrityGates.push({ gate: manuscriptGate });
+  if (releasesExternally && releaseGate && releaseTarget) {
+    integrityGates.push({ gate: releaseGate, target: releaseTarget });
+  }
+  if (releaseBinding) integrityGates.push(releaseBinding);
+  const stateCheck = validateState(context, { integrityGates });
+  const stateTrusted = stateCheck.errors.length === 0;
+  const gateTrusted = (gate, target = null) => stateTrusted
+    && gateStatus(context, gate, target) === "approved";
+  const untrustedSuffix = (gate, target = null) => gateStatus(context, gate, target) === "approved" && !stateTrusted
+    ? ` The recorded ${gate}${target ? `/${target}` : ""} approval is untrusted because state, revision, source, snapshot, or Gate bindings failed mechanical validation; run researchctl doctor.`
+    : "";
+
+  if (launchesExperiment && !gateTrusted(experimentGate)) {
+    return deny(`This is an explicit experiment, training, cluster, or hardware launch, but ${experimentGate || "the policy experiment Gate"} is not mechanically trusted.${untrustedSuffix(experimentGate)} Prepare the method and experiment contract, then record human approval through researchctl.`);
   }
 
-  if (gateBlocked(context, "claim_freeze") && manuscriptMutation(context, toolName, toolInput, text)) {
-    return deny("This tool call mechanically targets a manuscript or rebuttal artifact before claim_freeze is approved. Freeze evidence-bounded claims through researchctl before entering paper production.");
+  if (mutatesManuscript && !gateTrusted(manuscriptGate)) {
+    return deny(`This tool call mechanically targets a manuscript or rebuttal artifact before ${manuscriptGate || "the policy manuscript Gate"} is mechanically trusted.${untrustedSuffix(manuscriptGate)} Freeze evidence-bounded claims through researchctl before entering paper production.`);
   }
 
-  if (gateStatus(context, "release") === "approved" && manuscriptMutation(context, toolName, toolInput, text)) {
-    return deny("The release Gate is still approved, so changing a manuscript or rebuttal would make that approval stale. Reopen release through researchctl, make and verify the revision, then request approval for the new release target.");
+  if (releaseBinding) {
+    return deny(`The approved release binding ${releaseBinding.gate}/${releaseBinding.target} includes this artifact, so changing it would make that approval stale. Reopen that exact target through researchctl, make and verify the revision, then request fresh approval.`);
   }
 
-  if (gateBlocked(context, "release") && externalReleaseAction(toolName, command, text)) {
-    return deny("This appears to send, submit, publish, or upload a manuscript/reviewer response while the release Gate is not approved. Record explicit human release approval through researchctl first.");
+  if (releasesExternally && (!releaseTarget || !gateTrusted(releaseGate, releaseTarget))) {
+    const label = releaseTarget ? `${releaseGate}/${releaseTarget}` : (releaseGate || "the policy release Gate target");
+    return deny(`This appears to send, submit, publish, or upload a manuscript/reviewer response while ${label} is not mechanically trusted.${untrustedSuffix(releaseGate, releaseTarget)} Record explicit human approval for the exact release target through researchctl first.`);
   }
 
   return {};
+}
+
+function invalidPolicyPreToolUse(context, input) {
+  const toolName = getToolName(input);
+  const toolInput = getToolInput(input);
+  const text = normalizedToolText(toolInput);
+  const command = cleanText(commandText(toolInput));
+  const diagnosticResearchCtl = /(?:^|[\s"'/])researchctl(?:\.py)?["']?\s+(?:status|doctor|dashboard|disable)(?:\s|$)/i.test(command);
+  const risky = isMutatingTool(toolName)
+    || (isShellTool(toolName) && shellStateMutation(command) && !diagnosticResearchCtl)
+    || explicitExperimentLaunch(toolName, command, text)
+    || externalReleaseAction(toolName, command, text);
+  if (!risky) return {};
+  return deny(
+    "This project is enabled, but the canonical research policy or runtime contract is missing or invalid. "
+    + "Protected writes, experiment launches, and external release actions are blocked "
+    + "until both plugin authorities validate; use read-only inspection or researchctl status, "
+    + "doctor, or disable for diagnosis.",
+  );
 }
 
 function stateWasTouched(context, input) {
@@ -1273,156 +1940,231 @@ function stateWasTouched(context, input) {
     || /(?:^|[:._-])researchctl(?:$|[:._-])/i.test(toolName);
 }
 
-function validateArtifactPointers(
-  root,
-  value,
-  label,
-  errors,
-  warnings,
-  pointerFields,
-  stageIds,
-) {
-  const pointerMetadata = pointerFields.filter((field) => field !== "path");
-  const reservedIds = new Set(pointerFields);
-  const checkPointer = (pointer, pointerLabel, canonical, mappingKey = null) => {
-    if (!pointer || typeof pointer !== "object" || Array.isArray(pointer)) {
-      const message = `${pointerLabel} must be a structured artifact pointer`;
-      (canonical ? errors : warnings).push(canonical ? message : `legacy artifact pointer: ${message}`);
-      return;
-    }
-    const missing = pointerFields.filter((field) => !Object.prototype.hasOwnProperty.call(pointer, field));
-    if (missing.length) {
-      const message = `${pointerLabel} missing fields: ${missing.join(", ")}`;
-      (canonical ? errors : warnings).push(canonical ? message : `legacy artifact pointer: ${message}`);
-    }
-    const pathValue = pointer.path;
-    if (typeof pathValue !== "string" || !pathValue.trim()) {
-      const message = `${pointerLabel}.path must be a non-empty string`;
-      (canonical ? errors : warnings).push(canonical ? message : `legacy artifact pointer: ${message}`);
-      return;
-    }
-    let candidate;
-    try {
-      candidate = path.isAbsolute(pathValue) ? pathValue : path.resolve(root, pathValue);
-    } catch (_error) {
-      const message = `${pointerLabel}.path cannot be resolved`;
-      (canonical ? errors : warnings).push(canonical ? message : `legacy artifact pointer: ${message}`);
-      return;
-    }
-    const controlFiles = new Set([
-      path.resolve(root, ".research", "state.json"),
-      path.resolve(root, ".research", "state.lock"),
-      path.resolve(root, ".research", "memory.md"),
-      path.resolve(root, ".research", "project-state.yaml"),
-    ]);
-    let realCandidate = path.resolve(candidate);
-    try {
-      realCandidate = fs.realpathSync.native(candidate);
-    } catch (_error) {
-      // Missing paths are reported below.
-    }
-    const realControlFiles = new Set([...controlFiles].map((control) => {
-      try {
-        return fs.realpathSync.native(control);
-      } catch (_error) {
-        return control;
-      }
-    }));
-    const aliasesControlFile = [...controlFiles].some((control) => samePhysicalFile(candidate, control));
-    if (controlFiles.has(path.resolve(candidate))
-      || realControlFiles.has(realCandidate)
-      || aliasesControlFile) {
-      const message = `${pointerLabel} points to research control metadata, which cannot be evidence: ${pathValue}`;
-      (canonical ? errors : warnings).push(canonical ? message : `legacy artifact pointer: ${message}`);
-      return;
-    }
-    if (!fs.existsSync(candidate)) {
-      const message = `${pointerLabel} points to a missing artifact: ${pathValue}`;
-      (canonical ? errors : warnings).push(message);
-      return;
-    }
-    if (canonical && !isFile(candidate)) {
-      errors.push(`${pointerLabel} must point to a regular file: ${pathValue}`);
-    }
-    if (canonical) {
-      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(mappingKey) || reservedIds.has(mappingKey)) {
-        errors.push(`${pointerLabel} has an invalid or reserved artifact-ID mapping key`);
-      } else if (pointer.artifact_id !== mappingKey) {
-        errors.push(`${pointerLabel}.artifact_id must match its artifact-ID mapping key`);
-      }
-      if (typeof pointer.artifact_id !== "string"
-        || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(pointer.artifact_id)) {
-        errors.push(`${pointerLabel}.artifact_id has an invalid format`);
-      }
-      if ((typeof pointer.version !== "string" && typeof pointer.version !== "number")
-        || typeof pointer.version === "boolean" || !String(pointer.version).trim()) {
-        errors.push(`${pointerLabel}.version must be a non-empty string or integer`);
-      }
-      if (typeof pointer.content_hash !== "string"
-        || !/^sha256:[0-9a-f]{64}$/.test(pointer.content_hash)) {
-        errors.push(`${pointerLabel}.content_hash must be sha256:<64 lowercase hex>`);
-      }
-      if (typeof pointer.status !== "string" || !pointer.status.trim()) {
-        errors.push(`${pointerLabel}.status must be a non-empty string`);
-      }
-      const extra = Object.keys(pointer).filter((field) => !pointerFields.includes(field));
-      if (extra.length) {
-        errors.push(`${pointerLabel} has unknown fields: ${extra.sort().join(", ")}`);
-      }
-    }
-  };
+function plainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
-  const validateLegacy = (legacyValue, legacyLabel) => {
-    const stack = [[legacyValue, legacyLabel]];
-    while (stack.length) {
-      const [current, currentLabel] = stack.pop();
-      if (current === null || current === undefined) continue;
-      if (typeof current === "string") {
-        if (!current.trim()) warnings.push(`legacy artifact pointer: ${currentLabel} is an empty artifact path`);
-        else {
-          let candidate;
-          try {
-            candidate = path.isAbsolute(current) ? current : path.resolve(root, current);
-          } catch (_error) {
-            warnings.push(`artifact pointer cannot be resolved: ${currentLabel}`);
-            continue;
-          }
-          if (!fs.existsSync(candidate)) warnings.push(`${currentLabel} points to a missing artifact: ${current}`);
-        }
-        continue;
-      }
-      if (Array.isArray(current)) {
-        current.forEach((child, index) => stack.push([child, `${currentLabel}[${index}]`]));
-        continue;
-      }
-      if (!current || typeof current !== "object") {
-        warnings.push(`legacy artifact pointer: ${currentLabel} is not a valid artifact path`);
-        continue;
-      }
-      if (Object.prototype.hasOwnProperty.call(current, "path")) {
-        checkPointer(current, currentLabel, false);
-        continue;
-      }
-      if (pointerMetadata.some((key) => Object.prototype.hasOwnProperty.call(current, key))) {
-        warnings.push(`legacy artifact pointer: ${currentLabel} is an artifact pointer but has no path`);
-        continue;
-      }
-      for (const [key, child] of Object.entries(current)) stack.push([child, `${currentLabel}.${key}`]);
-    }
-  };
+function exactFields(value, fields, label, errors) {
+  if (!plainObject(value)) {
+    errors.push(`${label} must be an object`);
+    return false;
+  }
+  const missing = fields.filter((field) => !Object.prototype.hasOwnProperty.call(value, field));
+  const extra = Object.keys(value).filter((field) => !fields.includes(field));
+  if (missing.length) errors.push(`${label} missing fields: ${missing.sort().join(", ")}`);
+  if (extra.length) errors.push(`${label} has unknown fields: ${extra.sort().join(", ")}`);
+  return !missing.length && !extra.length;
+}
 
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    validateLegacy(value, label);
+function resolvedStoredPath(root, value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    return path.isAbsolute(value) ? path.resolve(value) : path.resolve(root, value);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function pathWithin(candidate, parent) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+}
+
+function hashFileWithSize(candidate) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(candidate, "r");
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile()) return { error: "not a regular file" };
+    const digest = crypto.createHash("sha256");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let size = 0;
+    while (true) {
+      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!count) break;
+      digest.update(buffer.subarray(0, count));
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      return { error: "changed while being verified" };
+    }
+    return { contentHash: `sha256:${digest.digest("hex")}`, sizeBytes: size };
+  } catch (error) {
+    return { error: error && error.code === "ENOENT" ? "missing" : "cannot be read" };
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch (_error) { /* nothing to recover */ }
+    }
+  }
+}
+
+function revisionStructure(value, label, revisionFields, errors) {
+  if (!exactFields(value, revisionFields, label, errors)) return false;
+  if (!Number.isInteger(value.revision) || value.revision <= 0) {
+    errors.push(`${label}.revision must be a positive integer`);
+  }
+  for (const field of ["source_path", "snapshot_path"]) {
+    if (typeof value[field] !== "string" || !value[field].trim()) {
+      errors.push(`${label}.${field} must be a non-empty string`);
+    }
+  }
+  if (typeof value.content_hash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.content_hash)) {
+    errors.push(`${label}.content_hash must be sha256:<64 lowercase hex>`);
+  }
+  if (!Number.isInteger(value.size_bytes) || value.size_bytes < 0) {
+    errors.push(`${label}.size_bytes must be a non-negative integer`);
+  }
+  if (utcTimestamp(value.registered_at) === null) {
+    errors.push(`${label}.registered_at must be a timezone-explicit UTC timestamp`);
+  }
+  return true;
+}
+
+function artifactReference(label, artifactId, revision, revisionFields) {
+  const reference = { label, artifact_id: artifactId };
+  for (const field of revisionFields) reference[field] = revision[field];
+  return reference;
+}
+
+function stableReference(reference) {
+  if (!plainObject(reference)) return JSON.stringify(reference);
+  return JSON.stringify(Object.fromEntries(
+    Object.keys(reference).sort().map((key) => [key, reference[key]]),
+  ));
+}
+
+function latestApprovalDecision(record) {
+  if (!plainObject(record) || !Array.isArray(record.history)) return null;
+  return [...record.history].reverse().find(
+    (decision) => plainObject(decision) && decision.action === "approve",
+  ) || null;
+}
+
+function mutableAfterApprovalRoles(policy, gate, target, approval) {
+  if (!plainObject(approval)) return new Set();
+  const spec = policy.gates[gate];
+  const contract = plainObject(spec && spec.approval_modes)
+    ? spec.approval_modes[approval.approval_mode]
+    : plainObject(spec && spec.approval_targets)
+      ? spec.approval_targets[target]
+      : null;
+  if (!plainObject(contract)) return new Set();
+  return new Set(
+    Array.isArray(contract.mutable_after_approval_roles)
+      ? contract.mutable_after_approval_roles.filter((role) => typeof role === "string")
+      : [],
+  );
+}
+
+function verifyReferenceFile(context, reference, label, kind, errors) {
+  const stored = reference && reference[`${kind}_path`];
+  const candidate = resolvedStoredPath(context.root, stored);
+  if (!candidate) {
+    errors.push(`${label}.${kind}_path cannot be resolved`);
     return;
   }
-  for (const [stage, stageBucket] of Object.entries(value)) {
-    const stageLabel = `${label}.${stage}`;
-    if (!stageIds.has(stage)) {
-      validateLegacy(stageBucket, stageLabel);
+  const snapshotRoot = path.resolve(context.root, context.policy.artifact_layout.snapshot_root);
+  if (kind === "snapshot") {
+    if (path.isAbsolute(stored) || !pathWithin(candidate, snapshotRoot)) {
+      errors.push(`${label}.snapshot_path must be project-relative under policy snapshot_root`);
+      return;
+    }
+    try {
+      const physicalSnapshot = fs.realpathSync.native(candidate);
+      const physicalRoot = fs.realpathSync.native(snapshotRoot);
+      const physicalProject = fs.realpathSync.native(context.root);
+      const physicalResearch = fs.realpathSync.native(path.join(context.root, ".research"));
+      if (!pathWithin(physicalResearch, physicalProject)
+        || !pathWithin(physicalRoot, physicalResearch)
+        || !pathWithin(physicalSnapshot, physicalRoot)) {
+        errors.push(`${label}.snapshot_path escapes policy snapshot_root through a symlink`);
+        return;
+      }
+    } catch (_error) {
+      // hashFileWithSize below reports a stable missing/unreadable diagnostic.
+    }
+  } else {
+    const controls = [
+      context.statePath,
+      path.join(context.root, ".research", "state.lock"),
+      context.memoryPath,
+      path.join(context.root, ".research", "dashboard.html"),
+      path.join(context.root, ".research", "project-state.yaml"),
+    ].map((item) => path.resolve(item));
+    if (pathWithin(candidate, snapshotRoot)
+      || controls.some((control) => candidate === control || samePhysicalFile(candidate, control))) {
+      errors.push(`${label}.source_path points to research control or snapshot data`);
+      return;
+    }
+  }
+  const actual = hashFileWithSize(candidate);
+  if (actual.error) {
+    errors.push(`${label} ${kind} is ${actual.error}: ${stored}`);
+  } else if (actual.contentHash !== reference.content_hash || actual.sizeBytes !== reference.size_bytes) {
+    errors.push(`${label} ${kind} mismatch: expected ${reference.content_hash} / ${reference.size_bytes} bytes`);
+  }
+}
+
+function integrityGateScope(policy, requestedGates) {
+  const sequence = approvalSequence(policy);
+  const scoped = new Set();
+  for (const requested of requestedGates) {
+    const gate = typeof requested === "string" ? requested : requested && requested.gate;
+    const target = typeof requested === "string" ? null : (requested && requested.target) ?? null;
+    const index = sequence.findIndex(
+      (reference) => reference.gate === gate && reference.target === target,
+    );
+    if (index < 0) continue;
+    for (const reference of sequence.slice(0, index + 1)) {
+      scoped.add(gateRefKey(reference.gate, reference.target));
+    }
+  }
+  return sequence.filter((reference) => scoped.has(gateRefKey(reference.gate, reference.target)));
+}
+
+function verifyApprovedGateIntegrity(context, gateIds, errors) {
+  if (!plainObject(context.state.gates)) return;
+  for (const reference of integrityGateScope(context.policy, gateIds)) {
+    const { gate, target } = reference;
+    const record = gateRecord(context.state, context.policy, gate, target);
+    if (!plainObject(record) || record.status !== "approved") continue;
+    const approval = latestApprovalDecision(record);
+    if (!plainObject(approval) || !Array.isArray(approval.artifact_refs)) continue;
+    const mutableRoles = mutableAfterApprovalRoles(
+      context.policy, gate, target, approval,
+    );
+    for (const [index, reference] of approval.artifact_refs.entries()) {
+      if (!plainObject(reference)) continue;
+      const label = `approved Gate ${gate}${target ? `/${target}` : ""} artifact_refs[${index}]`;
+      verifyReferenceFile(context, reference, label, "snapshot", errors);
+      if (!mutableRoles.has(referenceRole(reference))) {
+        verifyReferenceFile(context, reference, label, "source", errors);
+      }
+    }
+  }
+}
+
+function validateArtifactRegistry(context, errors) {
+  const { policy, runtime, state } = context;
+  const entryFields = runtime.artifact.entry_fields;
+  const revisionFields = runtime.artifact.revision_fields;
+  const current = new Map();
+  const revisionsByKey = new Map();
+  const snapshotOwners = new Map();
+  const artifacts = state.artifacts;
+  if (!plainObject(artifacts)) {
+    errors.push("artifacts must be an object using the v2 revision registry");
+    return { current, revisionsByKey };
+  }
+  for (const [stage, stageBucket] of Object.entries(artifacts)) {
+    const stageLabel = `artifacts.${stage}`;
+    if (!stageOrder(policy).includes(stage)) {
+      errors.push(`${stageLabel} uses an unknown stage`);
       continue;
     }
-    if (!stageBucket || typeof stageBucket !== "object" || Array.isArray(stageBucket)
-      || Object.prototype.hasOwnProperty.call(stageBucket, "path")) {
+    if (!plainObject(stageBucket)) {
       errors.push(`${stageLabel} must be a role mapping`);
       continue;
     }
@@ -1432,56 +2174,727 @@ function validateArtifactPointers(
         errors.push(`${roleLabel} role must use lower_snake_case`);
         continue;
       }
-      if (!roleBucket || typeof roleBucket !== "object" || Array.isArray(roleBucket)) {
+      if (!plainObject(roleBucket)) {
         errors.push(`${roleLabel} must be an artifact-ID mapping`);
         continue;
       }
-      if (Object.prototype.hasOwnProperty.call(roleBucket, "path")) {
-        checkPointer(roleBucket, roleLabel, false);
-        warnings.push(`legacy artifact pointer: ${roleLabel} should be re-registered under an artifact-ID mapping`);
-        continue;
+      if (Object.keys(roleBucket).length !== 1) {
+        errors.push(`${roleLabel} must contain exactly one canonical artifact ID`);
       }
-      for (const [artifactId, pointer] of Object.entries(roleBucket)) {
-        checkPointer(pointer, `${roleLabel}.${artifactId}`, true, artifactId);
+      for (const [artifactId, entry] of Object.entries(roleBucket)) {
+        const entryLabel = `${roleLabel}.${artifactId}`;
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(artifactId)) {
+          errors.push(`${entryLabel} has an invalid artifact ID`);
+          continue;
+        }
+        if (!exactFields(entry, entryFields, entryLabel, errors)) continue;
+        if (!Number.isInteger(entry.current_revision) || entry.current_revision <= 0) {
+          errors.push(`${entryLabel}.current_revision must be a positive integer`);
+        }
+        if (!Array.isArray(entry.revisions) || !entry.revisions.length) {
+          errors.push(`${entryLabel}.revisions must be a non-empty list`);
+          continue;
+        }
+        if (entry.current_revision !== entry.revisions.length) {
+          errors.push(`${entryLabel}.current_revision must identify the final revision`);
+        }
+        let priorRegisteredAt = null;
+        for (const [index, revision] of entry.revisions.entries()) {
+          const revisionLabel = `${entryLabel}.revisions[${index}]`;
+          if (!revisionStructure(revision, revisionLabel, revisionFields, errors)) continue;
+          if (revision.revision !== index + 1) {
+            errors.push(`${entryLabel}.revisions must be contiguous and ordered from 1`);
+          }
+          const registeredAt = utcTimestamp(revision.registered_at);
+          if (registeredAt !== null && priorRegisteredAt !== null && registeredAt <= priorRegisteredAt) {
+            errors.push(`${revisionLabel}.registered_at must be later than the prior revision`);
+          }
+          if (registeredAt !== null) priorRegisteredAt = registeredAt;
+          const reference = artifactReference(entryLabel, artifactId, revision, revisionFields);
+          revisionsByKey.set(`${entryLabel}@${revision.revision}`, reference);
+          if (typeof revision.snapshot_path === "string") {
+            const owner = snapshotOwners.get(revision.snapshot_path);
+            if (owner) errors.push(`${revisionLabel}.snapshot_path duplicates immutable snapshot owned by ${owner}`);
+            else snapshotOwners.set(revision.snapshot_path, revisionLabel);
+          }
+          if (revision.revision === entry.current_revision) current.set(entryLabel, reference);
+        }
+      }
+    }
+  }
+  return { current, revisionsByKey };
+}
+
+function referenceRole(reference) {
+  if (!plainObject(reference) || typeof reference.label !== "string") return null;
+  const match = /^artifacts\.([^.]+)\.([^.]+)\.([A-Za-z0-9][A-Za-z0-9._:-]*)$/.exec(reference.label);
+  if (!match || reference.artifact_id !== match[3]) return null;
+  return `${match[1]}.${match[2]}`;
+}
+
+function gateRoleContract(policy, gate, target, decision) {
+  const spec = policy.gates[gate];
+  if (plainObject(spec.approval_targets)) {
+    const contract = spec.approval_targets[target];
+    const roles = plainObject(contract) ? contract.required_artifact_roles : null;
+    return { required: Array.isArray(roles) ? roles : [], optional: [] };
+  }
+  if (plainObject(spec.approval_modes)) {
+    const contract = spec.approval_modes[decision.approval_mode];
+    return {
+      required: plainObject(contract) && Array.isArray(contract.required_artifact_roles)
+        ? contract.required_artifact_roles : [],
+      optional: plainObject(contract) && Array.isArray(contract.waivable_historical_roles)
+        ? contract.waivable_historical_roles : [],
+    };
+  }
+  return {
+    required: Array.isArray(spec.required_artifact_roles) ? spec.required_artifact_roles : [],
+    optional: [],
+  };
+}
+
+function validateReference(context, reference, label, registry, errors) {
+  const revisionFields = context.runtime.artifact.revision_fields;
+  const fields = [
+    ...context.runtime.artifact.reference_prefix_fields,
+    ...revisionFields,
+  ];
+  if (!exactFields(reference, fields, label, errors)) return null;
+  if (!referenceRole(reference)) errors.push(`${label}.label or artifact_id is invalid`);
+  revisionStructure(
+    Object.fromEntries(revisionFields.map((field) => [field, reference[field]])),
+    label,
+    revisionFields,
+    errors,
+  );
+  const registered = registry.revisionsByKey.get(`${reference.label}@${reference.revision}`);
+  if (!registered || stableReference(registered) !== stableReference(reference)) {
+    errors.push(`${label} does not match a registered immutable artifact revision`);
+  }
+  return referenceRole(reference);
+}
+
+function equalReferenceLists(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  return left.every((reference, index) => stableReference(reference) === stableReference(right[index]));
+}
+
+function validateDecisionDefense(decision, prefix, errors) {
+  for (const [field, required] of [
+    ["supporting_evidence_ids", true],
+    ["opposing_evidence_ids", false],
+    ["unresolved_risks", false],
+    ["decision_conditions", true],
+  ]) {
+    const values = decision[field];
+    if (!Array.isArray(values)
+      || values.some((value) => typeof value !== "string" || !value.trim())) {
+      errors.push(`${prefix}.${field} must be a string list`);
+    } else if (required && !values.length) {
+      errors.push(`${prefix}.${field} must not be empty`);
+    } else if (new Set(values).size !== values.length) {
+      errors.push(`${prefix}.${field} must not contain duplicates`);
+    }
+  }
+}
+
+function approvalBefore(record, timestamp) {
+  if (!plainObject(record) || !Array.isArray(record.history)) return false;
+  const prior = record.history.filter((decision) => (
+    plainObject(decision) && utcTimestamp(decision.decided_at) !== null
+      && utcTimestamp(decision.decided_at) < timestamp
+  ));
+  return Boolean(prior.length) && prior[prior.length - 1].new_status === "approved";
+}
+
+function validateCascadeContractV2(policy, decisionsById, errors) {
+  const sequence = approvalSequence(policy);
+  const events = [...decisionsById.entries()]
+    .map(([id, item]) => ({
+      id,
+      ...item,
+      key: gateRefKey(item.gate, item.target),
+      at: utcTimestamp(item.decision.decided_at),
+    }))
+    .filter((event) => event.at !== null)
+    .sort((left, right) => (left.at < right.at ? -1
+      : left.at > right.at ? 1 : left.id.localeCompare(right.id)));
+  const statusBefore = (key, timestamp) => {
+    const prior = events.filter((event) => event.key === key && event.at < timestamp);
+    return prior.length ? prior[prior.length - 1].decision.new_status : null;
+  };
+  const roots = events.filter((event) => event.decision.action === "reopen"
+    && !Object.prototype.hasOwnProperty.call(event.decision, "cascade"));
+  const linkedIds = new Set();
+  for (const root of roots) {
+    const linked = events.filter((event) => plainObject(event.decision.cascade)
+      && event.decision.cascade.upstream_decision_id === root.id)
+      .sort((left, right) => (left.at < right.at ? -1
+        : left.at > right.at ? 1 : left.id.localeCompare(right.id)));
+    linked.forEach((event) => linkedIds.add(event.id));
+    const boundary = linked.length ? linked[0].at : root.at;
+    const upstreamIndex = sequence.findIndex(
+      (reference) => gateRefKey(reference.gate, reference.target) === root.key,
+    );
+    const expected = [...sequence.slice(upstreamIndex + 1)].reverse()
+      .filter((reference) => statusBefore(
+        gateRefKey(reference.gate, reference.target), boundary,
+      ) === "approved")
+      .map((reference) => gateRefKey(reference.gate, reference.target));
+    if (linked.map((event) => event.key).join("\0") !== expected.join("\0")) {
+      errors.push(`cascade for ${root.id} must reopen exactly the approved downstream GateRefs in reverse approval sequence`);
+    }
+    let priorAt = null;
+    for (const event of linked) {
+      const cascade = event.decision.cascade;
+      if (priorAt !== null && event.at <= priorAt) {
+        errors.push(`cascade for ${root.id} timestamps must be strictly increasing`);
+      }
+      priorAt = event.at;
+      if (event.decision.action !== "reopen") {
+        errors.push(`cascade decision ${event.id} must be a downstream reopen`);
+      }
+      if (stableReference(cascade.upstream_gate_ref)
+          !== stableReference(gateRefObject(root.gate, root.target))
+        || cascade.upstream_reason !== root.decision.reason) {
+        errors.push(`cascade decision ${event.id} provenance does not match its upstream GateRef`);
+      }
+      for (const field of [
+        "supporting_evidence_ids", "opposing_evidence_ids",
+        "unresolved_risks", "decision_conditions",
+      ]) {
+        if (stableReference(event.decision[field])
+          !== stableReference(root.decision[field])) {
+          errors.push(`cascade decision ${event.id} ${field} does not match its upstream decision`);
+        }
+      }
+      if (event.at >= root.at) {
+        errors.push(`cascade decision ${event.id} must precede its upstream reopen decision`);
+      }
+    }
+    const linkedSet = new Set(linked.map((event) => event.id));
+    if (events.some((event) => event.at >= boundary && event.at < root.at
+      && !linkedSet.has(event.id))) {
+      errors.push(`cascade for ${root.id} has interleaved Gate decisions`);
+    }
+  }
+  for (const event of events) {
+    if (plainObject(event.decision.cascade) && !linkedIds.has(event.id)) {
+      errors.push(`cascade decision ${event.id} references an unknown or invalid upstream reopen`);
+    }
+  }
+}
+
+function validateGateRecordV2(
+  context, registry, gate, target, record, decisionsById, errors,
+) {
+  const { policy, runtime } = context;
+  const label = `${gate}${target ? `/${target}` : ""}`;
+  if (!exactFields(record, runtime.gate.record_fields, `Gate ${label}`, errors)) return;
+  const statuses = new Set(runtime.gate.statuses);
+  const actions = new Set(runtime.gate.actions);
+  if (!statuses.has(record.status)) errors.push(`Gate ${label} has invalid status`);
+  if (!Array.isArray(record.history)) {
+    errors.push(`Gate ${label} history must be an array`);
+    return;
+  }
+  if (!record.history.length) {
+    if (record.status !== "pending" || record.latest_decision_id !== null) {
+      errors.push(`Gate ${label} without history must be pending with null latest_decision_id`);
+    }
+    return;
+  }
+  let expectedStatus = "pending";
+  let priorDecisionAt = null;
+  let latestApproval = null;
+  let latestApprovedRefs = null;
+  for (const [index, decision] of record.history.entries()) {
+    const prefix = `Gate ${label} history[${index}]`;
+    if (!plainObject(decision)) {
+      errors.push(`${prefix} must be an object`);
+      continue;
+    }
+    const requiredFields = runtime.decision.required_fields;
+    const optionalFields = runtime.gate.decision_optional_fields;
+    const missing = requiredFields.filter(
+      (field) => !Object.prototype.hasOwnProperty.call(decision, field),
+    );
+    const unknown = Object.keys(decision).filter(
+      (field) => !requiredFields.includes(field) && !optionalFields.includes(field),
+    );
+    if (missing.length) errors.push(`${prefix} missing fields: ${missing.sort().join(", ")}`);
+    if (unknown.length) errors.push(`${prefix} has unknown fields: ${unknown.sort().join(", ")}`);
+    if (typeof decision.decision_id !== "string" || !decision.decision_id.trim()) {
+      errors.push(`${prefix} needs a decision_id`);
+    } else if (decisionsById.has(decision.decision_id)) {
+      errors.push(`${prefix} duplicates a decision_id`);
+    } else decisionsById.set(decision.decision_id, { gate, target, decision });
+    if (!actions.has(decision.action)) errors.push(`${prefix} has an invalid action`);
+    if (Object.prototype.hasOwnProperty.call(decision, "cascade")) {
+      if (decision.action !== "reopen") errors.push(`${prefix} cascade is valid only for reopen`);
+      if (exactFields(
+        decision.cascade,
+        runtime.gate.cascade_fields,
+        `${prefix}.cascade`,
+        errors,
+      )) {
+        if (!parseGateRef(policy, runtime, decision.cascade.upstream_gate_ref)) {
+          errors.push(`${prefix}.cascade upstream_gate_ref is invalid`);
+        }
+        for (const field of ["upstream_decision_id", "upstream_reason"]) {
+          if (typeof decision.cascade[field] !== "string"
+            || !decision.cascade[field].trim()) {
+            errors.push(`${prefix}.cascade ${field} must be non-empty`);
+          }
+        }
+      }
+    }
+    if (!statuses.has(decision.previous_status)
+      || decision.previous_status !== expectedStatus) {
+      errors.push(`${prefix} does not continue the Gate status chain`);
+    }
+    if (!statuses.has(decision.new_status)) errors.push(`${prefix} has invalid new_status`);
+    if (decision.action === "approve"
+      && (decision.previous_status === "approved" || decision.new_status !== "approved")) {
+      errors.push(`${prefix} has an invalid approve transition`);
+    }
+    if (decision.action === "reopen"
+      && (decision.previous_status !== "approved" || decision.new_status !== "reopened")) {
+      errors.push(`${prefix} has an invalid reopen transition`);
+    }
+    if (statuses.has(decision.new_status)) expectedStatus = decision.new_status;
+    for (const field of ["reason", "actor"]) {
+      if (typeof decision[field] !== "string" || !decision[field].trim()) {
+        errors.push(`${prefix} needs a ${field}`);
+      }
+    }
+    validateDecisionDefense(decision, prefix, errors);
+    const decidedAt = utcTimestamp(decision.decided_at);
+    if (decidedAt === null) errors.push(`${prefix} needs a UTC decided_at`);
+    else if (priorDecisionAt !== null && decidedAt <= priorDecisionAt) {
+      errors.push(`${prefix} must be later than the prior decision`);
+    } else priorDecisionAt = decidedAt;
+    const artifactRefs = Array.isArray(decision.artifact_refs) ? decision.artifact_refs : [];
+    if (!Array.isArray(decision.artifact_refs)) {
+      errors.push(`${prefix}.artifact_refs must be an array`);
+    }
+    const roles = [];
+    const labels = new Set();
+    for (const [refIndex, reference] of artifactRefs.entries()) {
+      const refPrefix = `${prefix}.artifact_refs[${refIndex}]`;
+      const role = validateReference(context, reference, refPrefix, registry, errors);
+      if (role) roles.push(role);
+      if (plainObject(reference) && typeof reference.label === "string") {
+        if (labels.has(reference.label)) errors.push(`${refPrefix} duplicates label ${reference.label}`);
+        labels.add(reference.label);
+        const registeredAt = utcTimestamp(reference.registered_at);
+        if (decision.action === "approve" && decidedAt !== null
+          && registeredAt !== null && registeredAt >= decidedAt) {
+          errors.push(`${refPrefix}.registered_at must be earlier than the approval decision`);
+        }
+      }
+    }
+
+    if (decision.action === "approve") {
+      const modeSpecs = policy.gates[gate].approval_modes;
+      if (plainObject(modeSpecs)) {
+        if (typeof decision.approval_mode !== "string"
+          || !plainObject(modeSpecs[decision.approval_mode])) {
+          errors.push(`${prefix} must name a configured approval_mode`);
+        }
+      } else if (Object.prototype.hasOwnProperty.call(decision, "approval_mode")) {
+        errors.push(`${prefix} must not define approval_mode`);
+      }
+      const contract = gateRoleContract(policy, gate, target, decision);
+      const allowed = new Set([...contract.required, ...contract.optional]);
+      for (const role of contract.required) {
+        if (roles.filter((candidate) => candidate === role).length !== 1) {
+          errors.push(`${prefix} must bind exactly one current artifact for ${role}`);
+        }
+      }
+      if (new Set(roles).size !== roles.length) {
+        errors.push(`${prefix} must bind exactly one canonical artifact per role`);
+      }
+      for (const role of roles) {
+        if (!allowed.has(role)) errors.push(`${prefix} binds unexpected artifact role ${role}`);
+      }
+      latestApproval = decision;
+      latestApprovedRefs = artifactRefs;
+
+      const selectionRole = policy.gates[gate].selection_artifact_role;
+      if (typeof selectionRole === "string") {
+        if (!plainObject(decision.selection)
+          || !exactFields(
+            decision.selection, runtime.gate.selection_fields, `${prefix}.selection`, errors,
+          )) {
+          errors.push(`${prefix} requires a structured selection`);
+        } else {
+          if (typeof decision.selection.selected_id !== "string"
+            || !decision.selection.selected_id.trim()) {
+            errors.push(`${prefix}.selection.selected_id must be a non-empty candidate ID`);
+          }
+          const selectedRole = validateReference(
+            context, decision.selection.artifact_ref,
+            `${prefix}.selection.artifact_ref`, registry, errors,
+          );
+          if (selectedRole !== selectionRole) {
+            errors.push(`${prefix}.selection must bind ${selectionRole}`);
+          }
+          if (!artifactRefs.some((reference) => stableReference(reference)
+              === stableReference(decision.selection.artifact_ref))) {
+            errors.push(`${prefix}.selection.artifact_ref must equal the Gate-bound portfolio revision`);
+          }
+        }
+      } else if (Object.prototype.hasOwnProperty.call(decision, "selection")) {
+        errors.push(`${prefix} must not define selection`);
+      }
+
+      if (decision.approval_mode === retrospectiveApprovalMode(policy.gates[gate])) {
+        const expectedWaived = contract.optional.filter((role) => !roles.includes(role));
+        if (!expectedWaived.length) {
+          errors.push(`${prefix} retrospective mode must waive unavailable historical roles`);
+        }
+        if (!Array.isArray(decision.waived_artifact_roles)
+          || decision.waived_artifact_roles.join("\0") !== expectedWaived.join("\0")) {
+          errors.push(`${prefix}.waived_artifact_roles do not match absent optional roles`);
+        }
+      } else if (Object.prototype.hasOwnProperty.call(decision, "waived_artifact_roles")) {
+        errors.push(`${prefix} waived_artifact_roles are valid only for retrospective mode`);
+      }
+    } else {
+      if (latestApprovedRefs !== null
+        && !equalReferenceLists(artifactRefs, latestApprovedRefs)) {
+        errors.push(`${prefix} reopen artifact_refs must match the latest approval`);
+      }
+      for (const field of ["selection", "approval_mode", "waived_artifact_roles"]) {
+        if (Object.prototype.hasOwnProperty.call(decision, field)) {
+          errors.push(`${prefix}.${field} is valid only for approval`);
+        }
+      }
+    }
+  }
+  const last = record.history[record.history.length - 1];
+  if (!plainObject(last) || last.decision_id !== record.latest_decision_id) {
+    errors.push(`Gate ${label} latest_decision_id does not match history`);
+  }
+  if (!plainObject(last) || last.new_status !== record.status) {
+    errors.push(`Gate ${label} status does not match history`);
+  }
+  if (record.status === "approved" && plainObject(latestApproval)) {
+    const mutableRoles = mutableAfterApprovalRoles(policy, gate, target, latestApproval);
+    for (const reference of latestApproval.artifact_refs || []) {
+      const current = registry.current.get(reference.label);
+      if (mutableRoles.has(referenceRole(reference))) {
+        if (!current || current.artifact_id !== reference.artifact_id) {
+          errors.push(`approved Gate ${label} mutable artifact identity changed for ${reference.label}`);
+        }
+      } else if (!current || stableReference(current) !== stableReference(reference)) {
+        errors.push(`approved Gate ${label} does not bind the current artifact revision for ${reference.label}`);
       }
     }
   }
 }
 
-function utcTimestamp(value) {
-  if (typeof value !== "string"
-    || !/(?:Z|\+00:00)$/.test(value)
-    || Number.isNaN(Date.parse(value))) return null;
-  return Date.parse(value);
+function validateGateRecordsV2(context, registry, errors) {
+  const { state, policy, runtime } = context;
+  const gates = state.gates;
+  const decisionsById = new Map();
+  if (!plainObject(gates)) {
+    errors.push("gates must be an object");
+    return decisionsById;
+  }
+  const orderedGates = gateOrder(policy);
+  for (const gate of orderedGates) {
+    if (!Object.prototype.hasOwnProperty.call(gates, gate)) errors.push(`missing Gate: ${gate}`);
+  }
+  for (const gate of Object.keys(gates)) {
+    if (!orderedGates.includes(gate)) errors.push(`unknown Gate: ${gate}`);
+  }
+  for (const gate of orderedGates) {
+    const targets = approvalTargets(policy, gate);
+    const container = gates[gate];
+    if (targets.length) {
+      if (!exactFields(
+        container, runtime.gate.target_container_fields, `targeted Gate ${gate}`, errors,
+      )
+        || !plainObject(container.targets)) continue;
+      const actualTargets = Object.keys(container.targets);
+      if (actualTargets.length !== targets.length
+        || targets.some((target) => !actualTargets.includes(target))) {
+        errors.push(`Gate ${gate}.targets must define exactly ${targets.join(", ")}`);
+        continue;
+      }
+      for (const target of targets) {
+        validateGateRecordV2(
+          context, registry, gate, target, container.targets[target], decisionsById, errors,
+        );
+      }
+    } else {
+      validateGateRecordV2(context, registry, gate, null, container, decisionsById, errors);
+    }
+  }
+
+  validateCascadeContractV2(policy, decisionsById, errors);
+  const sequence = approvalSequence(policy);
+  for (const [index, reference] of sequence.entries()) {
+    const record = gateRecord(state, policy, reference.gate, reference.target);
+    const prerequisites = sequence.slice(0, index);
+    const label = `${reference.gate}${reference.target ? `/${reference.target}` : ""}`;
+    if (plainObject(record) && record.status === "approved") {
+      for (const prerequisite of prerequisites) {
+        const prerequisiteRecord = gateRecord(
+          state, policy, prerequisite.gate, prerequisite.target,
+        );
+        if (!plainObject(prerequisiteRecord) || prerequisiteRecord.status !== "approved") {
+          errors.push(`approved Gate ${label} requires approved Gate ${prerequisite.gate}${prerequisite.target ? `/${prerequisite.target}` : ""}`);
+        }
+      }
+    }
+    if (!plainObject(record) || !Array.isArray(record.history)) continue;
+    for (const [historyIndex, decision] of record.history.entries()) {
+      if (!plainObject(decision) || decision.action !== "approve") continue;
+      const decidedAt = utcTimestamp(decision.decided_at);
+      if (decidedAt === null) continue;
+      for (const prerequisite of prerequisites) {
+        const prerequisiteRecord = gateRecord(
+          state, policy, prerequisite.gate, prerequisite.target,
+        );
+        if (!approvalBefore(prerequisiteRecord, decidedAt)) {
+          errors.push(`Gate ${label} history[${historyIndex}] approval lacks prior approval of prerequisite Gate ${prerequisite.gate}${prerequisite.target ? `/${prerequisite.target}` : ""}`);
+        }
+      }
+    }
+  }
+  return decisionsById;
 }
 
-function validateState(context) {
-  const { state, policy, root } = context;
+function validateLifecycleV2(context, registry, gateDecisions, errors) {
+  const { lifecycle } = context.state;
+  const { runtime, policy } = context;
+  if (!exactFields(
+    lifecycle, runtime.lifecycle.record_fields, "lifecycle", errors,
+  )) return;
+  if (!runtime.lifecycle.statuses.includes(lifecycle.status)) {
+    errors.push("lifecycle has an invalid status");
+  }
+  if (!Array.isArray(lifecycle.history)) {
+    errors.push("lifecycle.history must be an array");
+    return;
+  }
+  if (!lifecycle.history.length) {
+    if (lifecycle.status !== "active" || lifecycle.latest_decision_id !== null) {
+      errors.push("lifecycle without history must be active with null latest_decision_id");
+    }
+    return;
+  }
+
+  let expectedStatus = "active";
+  let priorDecisionAt = null;
+  const ids = new Set(gateDecisions.keys());
+  const requiredFields = [
+    ...runtime.decision.required_fields,
+    ...runtime.lifecycle.decision_fields,
+  ];
+  for (const [index, decision] of lifecycle.history.entries()) {
+    const prefix = `lifecycle history[${index}]`;
+    if (!plainObject(decision)) {
+      errors.push(`${prefix} must be an object`);
+      continue;
+    }
+    const missing = requiredFields.filter(
+      (field) => !Object.prototype.hasOwnProperty.call(decision, field),
+    );
+    const unknown = Object.keys(decision).filter(
+      (field) => !requiredFields.includes(field)
+        && !runtime.lifecycle.decision_optional_fields.includes(field),
+    );
+    if (missing.length) errors.push(`${prefix} missing fields: ${missing.sort().join(", ")}`);
+    if (unknown.length) errors.push(`${prefix} has unknown fields: ${unknown.sort().join(", ")}`);
+    if (typeof decision.decision_id !== "string" || !decision.decision_id.trim()) {
+      errors.push(`${prefix} needs a decision_id`);
+    } else if (ids.has(decision.decision_id)) {
+      errors.push(`${prefix} duplicates a decision_id`);
+    } else ids.add(decision.decision_id);
+
+    const transition = new Map([
+      ["active\0terminate", "terminated"],
+      ["active\0complete", "completed"],
+      ["terminated\0reopen", "active"],
+      ["completed\0reopen", "active"],
+    ]).get(`${decision.previous_status}\0${decision.action}`);
+    if (decision.previous_status !== expectedStatus
+      || decision.new_status !== transition) {
+      errors.push(`${prefix} has an invalid lifecycle transition`);
+    }
+    if (runtime.lifecycle.statuses.includes(decision.new_status)) {
+      expectedStatus = decision.new_status;
+    }
+    for (const field of ["reason", "actor"]) {
+      if (typeof decision[field] !== "string" || !decision[field].trim()) {
+        errors.push(`${prefix} needs a ${field}`);
+      }
+    }
+    validateDecisionDefense(decision, prefix, errors);
+    const decidedAt = utcTimestamp(decision.decided_at);
+    if (decidedAt === null) errors.push(`${prefix} needs a UTC decided_at`);
+    else if (priorDecisionAt !== null && decidedAt <= priorDecisionAt) {
+      errors.push(`${prefix} must be later than the prior decision`);
+    } else priorDecisionAt = decidedAt;
+    if (decision.action === "complete" && decidedAt !== null) {
+      const releaseGate = releaseGateId(policy);
+      const initialTarget = initialReleaseTarget(policy);
+      const release = gateRecord(
+        context.state, policy, releaseGate, initialTarget,
+      );
+      const priorRelease = plainObject(release) && Array.isArray(release.history)
+        ? release.history.filter((item) => plainObject(item)
+          && utcTimestamp(item.decided_at) !== null
+          && utcTimestamp(item.decided_at) < decidedAt)
+        : [];
+      if (!priorRelease.length || priorRelease.at(-1).new_status !== "approved") {
+        const label = releaseGate && initialTarget
+          ? `${releaseGate}/${initialTarget}` : "the initial release Gate target";
+        errors.push(`${prefix} complete requires prior approved Gate ${label}`);
+      }
+    }
+    if (!stageOrder(policy).includes(decision.stage)) {
+      errors.push(`${prefix} has an unknown stage`);
+    }
+
+    if (!Array.isArray(decision.artifact_refs)) {
+      errors.push(`${prefix}.artifact_refs must be an array`);
+    } else if (!decision.artifact_refs.length) {
+      if (decidedAt === null
+        || artifactRevisionExistedBefore(context.state, decidedAt)) {
+        errors.push(`${prefix}.artifact_refs must be non-empty when registered artifacts existed at decision time`);
+      }
+    } else {
+      const labels = new Set();
+      for (const [refIndex, reference] of decision.artifact_refs.entries()) {
+        validateReference(
+          context, reference, `${prefix}.artifact_refs[${refIndex}]`, registry, errors,
+        );
+        if (plainObject(reference) && typeof reference.label === "string") {
+          if (labels.has(reference.label)) {
+            errors.push(`${prefix}.artifact_refs[${refIndex}] duplicates a label`);
+          }
+          labels.add(reference.label);
+        }
+      }
+    }
+
+    const hasGateRef = Object.prototype.hasOwnProperty.call(decision, "gate_ref");
+    const hasGateDecision = Object.prototype.hasOwnProperty.call(
+      decision, "gate_decision_id",
+    );
+    if (hasGateRef !== hasGateDecision) {
+      errors.push(`${prefix} gate_ref and gate_decision_id must appear together`);
+    } else if (hasGateRef) {
+      const parsed = parseGateRef(policy, runtime, decision.gate_ref);
+      const linked = gateDecisions.get(decision.gate_decision_id);
+      if (decision.action !== "reopen" || !parsed || !linked
+        || linked.decision.action !== "reopen"
+        || parsed.gate !== linked.gate || parsed.target !== linked.target) {
+        errors.push(`${prefix} has an invalid affected Gate linkage`);
+      }
+    } else if (decision.previous_status === "completed"
+      && decision.action === "reopen") {
+      errors.push(`${prefix} completed reopen must link an affected Gate`);
+    }
+  }
+  const last = plainObject(lifecycle.history.at(-1)) ? lifecycle.history.at(-1) : {};
+  if (lifecycle.latest_decision_id !== last.decision_id) {
+    errors.push("lifecycle latest_decision_id does not match its history");
+  }
+  if (lifecycle.status !== last.new_status) {
+    errors.push("lifecycle status does not match its history");
+  }
+}
+
+function artifactRevisionExistedBefore(state, decidedAt) {
+  if (decidedAt === null || !plainObject(state.artifacts)) return false;
+  for (const stageBucket of Object.values(state.artifacts)) {
+    if (!plainObject(stageBucket)) continue;
+    for (const roleBucket of Object.values(stageBucket)) {
+      if (!plainObject(roleBucket)) continue;
+      for (const entry of Object.values(roleBucket)) {
+        if (!plainObject(entry) || !Array.isArray(entry.revisions)) continue;
+        for (const revision of entry.revisions) {
+          const registeredAt = plainObject(revision)
+            ? utcTimestamp(revision.registered_at) : null;
+          if (registeredAt !== null && registeredAt < decidedAt) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function validateActivationV2(context, errors) {
+  const { activation_history: history } = context.state;
+  const { runtime } = context;
+  if (!Array.isArray(history)) {
+    errors.push("activation_history must be an array");
+    return;
+  }
+  let expectedEnabled = true;
+  let priorAt = null;
+  for (const [index, event] of history.entries()) {
+    const prefix = `activation_history[${index}]`;
+    if (!exactFields(event, runtime.activation.event_fields, prefix, errors)) continue;
+    const expectedNew = event.action === "enable" ? true
+      : event.action === "disable" ? false : null;
+    if (!runtime.activation.actions.includes(event.action)) {
+      errors.push(`${prefix} has an invalid action`);
+    }
+    if (event.previous_enabled !== expectedEnabled || event.new_enabled !== expectedNew) {
+      errors.push(`${prefix} does not continue activation state`);
+    }
+    if (typeof event.new_enabled === "boolean") expectedEnabled = event.new_enabled;
+    for (const field of ["reason", "actor"]) {
+      if (typeof event[field] !== "string" || !event[field].trim()) {
+        errors.push(`${prefix} needs a ${field}`);
+      }
+    }
+    const at = utcTimestamp(event.decided_at);
+    if (at === null) errors.push(`${prefix} needs a UTC decided_at`);
+    else if (priorAt !== null && at <= priorAt) {
+      errors.push(`${prefix} must be later than the prior event`);
+    } else priorAt = at;
+  }
+  if (context.state.enabled !== expectedEnabled) {
+    errors.push("enabled does not match activation_history");
+  }
+}
+
+function utcTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(?:Z|\+00:00)$/.exec(value);
+  if (!match) return null;
+  const milliseconds = Date.parse(`${match[1]}Z`);
+  if (Number.isNaN(milliseconds)
+    || new Date(milliseconds).toISOString().slice(0, 19) !== match[1]) return null;
+  const nanoseconds = BigInt((match[2] || "").padEnd(9, "0"));
+  return BigInt(milliseconds) * 1000000n + nanoseconds;
+}
+
+function validateState(context, { integrityGates = [] } = {}) {
+  const { state, policy, runtime } = context;
   const errors = [];
   const warnings = [];
-  const contract = policy.state_contract && typeof policy.state_contract === "object"
-    ? policy.state_contract
-    : {};
-  const pointerFields = Array.isArray(contract.artifact_pointer_fields)
-    ? contract.artifact_pointer_fields
-    : ["path", "artifact_id", "version", "content_hash", "status"];
-  const required = Array.isArray(contract.required_fields) ? contract.required_fields : [];
-  for (const field of required) {
-    if (!Object.prototype.hasOwnProperty.call(state, field)) errors.push(`missing state field: ${field}`);
-  }
+  exactFields(state, runtime.state.required_fields, "state", errors);
   if (state.schema_version !== policy.schema_version) {
     errors.push(`schema_version ${JSON.stringify(state.schema_version)} does not match policy ${JSON.stringify(policy.schema_version)}`);
   }
   if (state.workflow_version !== policy.workflow_version) {
     errors.push(`workflow_version ${JSON.stringify(state.workflow_version)} does not match policy ${JSON.stringify(policy.workflow_version)}`);
   }
-  if (state.enabled !== true) errors.push("enabled must be true for an active research project");
+  if (typeof state.enabled !== "boolean") errors.push("enabled must be a boolean");
   if (typeof state.project_id !== "string" || !state.project_id.trim()) errors.push("project_id must be a non-empty string");
-  if (Object.prototype.hasOwnProperty.call(state, "project_name")
-    && (typeof state.project_name !== "string" || !state.project_name.trim())) {
-    errors.push("project_name must be a non-empty string when present");
-  }
-  if (!policy.stage_order.includes(state.current_stage)) {
+  if (typeof state.project_name !== "string" || !state.project_name.trim()) errors.push("project_name must be a non-empty string");
+  const stages = stageOrder(policy);
+  if (!stages.includes(state.current_stage)) {
     errors.push(`unknown current_stage: ${JSON.stringify(state.current_stage)}`);
   }
   const createdAt = utcTimestamp(state.created_at);
@@ -1492,135 +2905,37 @@ function validateState(context) {
     errors.push("updated_at must not be earlier than created_at");
   }
 
-  const statuses = Array.isArray(contract.gate_statuses)
-    ? new Set(contract.gate_statuses)
-    : new Set(["pending", "approved", "reopened"]);
-  if (!state.gates || typeof state.gates !== "object" || Array.isArray(state.gates)) {
-    errors.push("gates must be an object");
-  } else {
-    const actualGates = Object.keys(state.gates);
-    for (const gate of policy.gate_order) {
-      const record = state.gates[gate];
-      if (!record || typeof record !== "object" || Array.isArray(record)) {
-        errors.push(`Gate ${gate} must be an object`);
-        continue;
-      }
-      if (!statuses.has(record.status)) errors.push(`Gate ${gate} has invalid status ${JSON.stringify(record.status)}`);
-      if (!Array.isArray(record.history)) errors.push(`Gate ${gate} history must be an array`);
-      if (record.latest_decision_id !== null && typeof record.latest_decision_id !== "string") {
-        errors.push(`Gate ${gate} latest_decision_id must be null or a string`);
-      }
-      if (Array.isArray(record.history) && record.history.length === 0) {
-        if (record.status !== "pending") errors.push(`Gate ${gate} without history must be pending`);
-        if (record.latest_decision_id !== null) errors.push(`Gate ${gate} without history must not have a decision ID`);
-      }
-      if (Array.isArray(record.history) && record.history.length > 0) {
-        let expectedStatus = "pending";
-        let priorDecisionAt = null;
-        for (const [index, decision] of record.history.entries()) {
-          const prefix = `Gate ${gate} history[${index}]`;
-          if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
-            errors.push(`${prefix} must be an object`);
-            continue;
-          }
-          if (decision.previous_status !== expectedStatus) {
-            errors.push(`${prefix} does not continue the Gate status chain`);
-          }
-          if (decision.action === "approve") {
-            if (decision.previous_status === "approved" || decision.new_status !== "approved") {
-              errors.push(`${prefix} has an invalid approve transition`);
-            }
-          } else if (decision.action === "reopen") {
-            if (decision.previous_status !== "approved" || decision.new_status !== "reopened") {
-              errors.push(`${prefix} has an invalid reopen transition`);
-            }
-          } else {
-            errors.push(`${prefix} has an invalid action`);
-          }
-          if (statuses.has(decision.new_status)) expectedStatus = decision.new_status;
-          if (typeof decision.decision_id !== "string" || !decision.decision_id.trim()) {
-            errors.push(`${prefix} needs a decision_id`);
-          }
-          if (typeof decision.reason !== "string" || !decision.reason.trim()) {
-            errors.push(`${prefix} needs a reason`);
-          }
-          if (typeof decision.actor !== "string" || !decision.actor.trim()) {
-            errors.push(`${prefix} needs an actor`);
-          }
-          if (!Array.isArray(decision.artifact_refs)) {
-            errors.push(`${prefix}.artifact_refs must be an array`);
-          }
-          const decisionAt = utcTimestamp(decision.decided_at);
-          if (decisionAt === null) errors.push(`${prefix} needs a UTC decided_at`);
-          else if (priorDecisionAt !== null && decisionAt < priorDecisionAt) {
-            errors.push(`${prefix} is earlier than the prior decision`);
-          } else priorDecisionAt = decisionAt;
-          if (gate === "release") {
-            const targets = context.policy.gates.release.release_targets;
-            if (!Array.isArray(targets) || !targets.includes(decision.release_target)) {
-              errors.push(`${prefix} has an invalid release_target`);
-            }
-          } else if (Object.prototype.hasOwnProperty.call(decision, "release_target")) {
-            errors.push(`${prefix} must not define release_target`);
-          }
-        }
-        const last = record.history[record.history.length - 1];
-        if (!last || typeof last !== "object") {
-          errors.push(`Gate ${gate} last history entry must be an object`);
-        } else {
-          if (last.decision_id !== record.latest_decision_id) errors.push(`Gate ${gate} latest_decision_id does not match history`);
-          if (last.new_status !== record.status) errors.push(`Gate ${gate} status does not match history`);
-        }
-      }
-    }
-    for (const gate of actualGates) {
-      if (!policy.gate_order.includes(gate)) errors.push(`unknown Gate: ${gate}`);
-    }
+  const registry = validateArtifactRegistry(context, errors);
+  const decisionsById = validateGateRecordsV2(context, registry, errors);
+  validateLifecycleV2(context, registry, decisionsById, errors);
+  validateActivationV2(context, errors);
+  verifyApprovedGateIntegrity(context, integrityGates, errors);
 
-    if (policy.stage_order.includes(state.current_stage)) {
-      const currentIndex = policy.stage_order.indexOf(state.current_stage);
-      for (const gate of policy.gate_order) {
-        const spec = policy.gates[gate];
-        const target = spec && spec.advance_to;
-        const record = state.gates[gate];
-        let gateSatisfied = Boolean(record && record.status === "approved");
-        if (gate === "release" && state.current_stage === "revision" && record && Array.isArray(record.history)) {
-          gateSatisfied = record.history.some((decision) => (
-            decision
-            && typeof decision === "object"
-            && decision.action === "approve"
-            && decision.release_target === "initial_submission"
-          ));
-        }
-        if (
-          policy.stage_order.includes(target)
-          && currentIndex >= policy.stage_order.indexOf(target)
-          && !gateSatisfied
-        ) {
-          errors.push(`current_stage ${state.current_stage} requires approved Gate ${gate}`);
+  if (plainObject(state.gates) && stages.includes(state.current_stage)) {
+    const currentIndex = stages.indexOf(state.current_stage);
+    for (const reference of approvalSequence(policy)) {
+      const destinations = [];
+      for (const source of stages) {
+        for (const candidate of policy.workflow_graph.stage_transitions[source]) {
+          const required = transitionGateRef(policy, source, candidate.to);
+          if (required && required.gate === reference.gate
+            && required.target === reference.target) destinations.push(candidate.to);
         }
       }
+      if (!destinations.length
+        || Math.min(...destinations.map((stage) => stages.indexOf(stage))) > currentIndex) continue;
+      const record = gateRecord(state, policy, reference.gate, reference.target);
+      if (!plainObject(record) || record.status !== "approved") {
+        errors.push(`current_stage ${state.current_stage} requires approved Gate ${reference.gate}${reference.target ? `/${reference.target}` : ""}`);
+      }
     }
-  }
-
-  if (!state.artifacts || (typeof state.artifacts !== "object")) {
-    errors.push("artifacts must be an object or array");
-  } else {
-    validateArtifactPointers(
-      root,
-      state.artifacts,
-      "artifacts",
-      errors,
-      warnings,
-      pointerFields,
-      new Set(policy.stage_order),
-    );
   }
   if (state.last_checkpoint !== null && state.last_checkpoint !== undefined) {
     const checkpoint = state.last_checkpoint;
     if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) {
       errors.push("last_checkpoint must be null or an object");
     } else {
+      exactFields(checkpoint, runtime.checkpoint.fields, "last_checkpoint", errors);
       if (typeof checkpoint.summary !== "string" || !checkpoint.summary.trim()) {
         errors.push("last_checkpoint.summary must be non-empty");
       }
@@ -1634,28 +2949,88 @@ function validateState(context) {
   if (Object.prototype.hasOwnProperty.call(state, "stage_history") && !Array.isArray(state.stage_history)) {
     errors.push("stage_history must be an array");
   } else if (Array.isArray(state.stage_history)) {
-    let expectedStage = policy.stage_order[0];
+    let expectedStage = stages[0];
     let priorTransitionAt = null;
     for (const [index, transition] of state.stage_history.entries()) {
       const prefix = `stage_history[${index}]`;
-      if (!transition || typeof transition !== "object" || Array.isArray(transition)) {
-        errors.push(`${prefix} must be an object`);
-        continue;
-      }
+      if (!exactFields(
+        transition, runtime.stage_transition.fields, prefix, errors,
+      )) continue;
       if (transition.from_stage !== expectedStage) errors.push(`${prefix} breaks stage continuity`);
-      if (!policy.stage_order.includes(transition.from_stage)
-        || !policy.stage_order.includes(transition.to_stage)) {
+      if (!stages.includes(transition.from_stage)
+        || !stages.includes(transition.to_stage)) {
         errors.push(`${prefix} contains an unknown stage`);
       } else {
         expectedStage = transition.to_stage;
       }
       if (typeof transition.trigger !== "string" || !transition.trigger.trim()) {
         errors.push(`${prefix} needs a trigger`);
+      } else {
+        const gatePrefixes = runtime.stage_transition.trigger_prefixes
+          .filter((candidate) => candidate.startsWith("gate-"));
+        const match = new RegExp(`^(${gatePrefixes.join("|")}):(.+)$`).exec(
+          transition.trigger,
+        );
+        if (match) {
+          const expectedAction = match[1].slice("gate-".length);
+          const linked = decisionsById.get(match[2]);
+          if (!linked) errors.push(`${prefix} references an unknown Gate decision`);
+          else {
+            if (linked.decision.action !== expectedAction) errors.push(`${prefix} trigger action does not match its decision`);
+            if (Object.prototype.hasOwnProperty.call(linked.decision, "cascade")) errors.push(`${prefix} cascade decisions must not drive stage transitions`);
+            if (expectedAction === "reopen") {
+              if (linked.decision.decided_at !== transition.timestamp) errors.push(`${prefix} timestamp does not match its Gate decision`);
+              const owner = gateRefOwner(policy, linked.gate, linked.target);
+              if (!owner || transition.to_stage !== owner.stage) {
+                errors.push(`${prefix} target does not match its GateRef owner stage`);
+              }
+            } else {
+              const transitionAt = utcTimestamp(transition.timestamp);
+              const decisionAt = utcTimestamp(linked.decision.decided_at);
+              const linkedRecord = gateRecord(
+                state, policy, linked.gate, linked.target,
+              );
+              const linkedHistory = plainObject(linkedRecord)
+                && Array.isArray(linkedRecord.history) ? linkedRecord.history : [];
+              const decisionsAtTransition = linkedHistory.filter((decision) => {
+                const decidedAt = plainObject(decision)
+                  ? utcTimestamp(decision.decided_at) : null;
+                return decidedAt !== null
+                  && transitionAt !== null
+                  && decidedAt <= transitionAt;
+              });
+              const activeDecision = decisionsAtTransition.at(-1);
+              if (decisionAt === null
+                || transitionAt === null
+                || decisionAt > transitionAt
+                || !plainObject(activeDecision)
+                || activeDecision.decision_id !== match[2]
+                || activeDecision.new_status !== "approved") {
+                errors.push(`${prefix} must use the active Gate approval at the transition timestamp`);
+              }
+              const required = transitionGateRef(
+                policy, transition.from_stage, transition.to_stage,
+              );
+              if (!required || required.gate !== linked.gate
+                || required.target !== linked.target) {
+                errors.push(`${prefix} target does not match its GateRef transition`);
+              }
+            }
+          }
+        } else if (!runtime.stage_transition.trigger_prefixes.includes(
+          transition.trigger,
+        )) errors.push(`${prefix} has unsupported trigger`);
+        else {
+          const rule = transitionRule(policy, transition.from_stage, transition.to_stage);
+          if (!rule || rule.trigger.type !== "checkpoint") {
+            errors.push(`${prefix} checkpoint cannot drive a stage-exit transition`);
+          }
+        }
       }
       const transitionAt = utcTimestamp(transition.timestamp);
       if (transitionAt === null) errors.push(`${prefix} needs a UTC timestamp`);
-      else if (priorTransitionAt !== null && transitionAt < priorTransitionAt) {
-        errors.push(`${prefix} is earlier than the prior transition`);
+      else if (priorTransitionAt !== null && transitionAt <= priorTransitionAt) {
+        errors.push(`${prefix} must be later than the prior transition`);
       } else priorTransitionAt = transitionAt;
     }
     if (expectedStage !== state.current_stage) {
@@ -1663,20 +3038,20 @@ function validateState(context) {
     }
   }
   if (!isFile(context.memoryPath)) errors.push("missing .research/memory.md");
-  return { errors, warnings };
+  return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
 }
 
 function postToolUse(context, input) {
   if (!stateWasTouched(context, input)) return {};
-  const result = validateState(context);
+  const result = validateState(context, { integrityGates: approvalSequence(context.policy) });
   const lines = [
     "[POST-TOOL RESEARCH STATE QUICK CHECK]",
     result.errors.length
-      ? `Detected structural state/Gate errors (${result.errors.length}):\n${listLines(result.errors)}`
-      : "Quick structural state/Gate checks found no issue.",
+      ? `Detected mechanical state, revision, snapshot, or Gate errors (${result.errors.length}):\n${listLines(result.errors)}`
+      : "Mechanical state, current-source, immutable-snapshot, and Gate checks found no issue.",
     result.warnings.length
-      ? `Artifact warnings (${result.warnings.length}):\n${listLines(result.warnings)}`
-      : "Registered artifact pointers are structurally valid and currently resolvable; use researchctl doctor for authoritative hash verification.",
+      ? `Warnings (${result.warnings.length}):\n${listLines(result.warnings)}`
+      : "researchctl doctor remains the authoritative full CLI diagnostic.",
   ];
   if (result.errors.length) {
     lines.push("Do not treat the state as authoritative until researchctl doctor passes. Repair it through researchctl; never hand-edit Gate fields.");
@@ -1688,440 +3063,88 @@ function getStopHookActive(input) {
   return firstDefined(input, ["stop_hook_active", "stopHookActive"]) === true;
 }
 
-function regexAlternation(values) {
-  return values
-    .filter((value) => typeof value === "string" && value)
-    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join("|");
-}
-
-function assertionLine(rawLine) {
-  const normalized = cleanText(rawLine);
-  if (/^(?: {4,}|\t)/.test(normalized)) return "";
-  const line = normalized.trim();
-  if (!line || /^>/.test(line)) return "";
-  const unwrapped = line
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "")
-    .trim();
-  if (/^(`+)[\s\S]*\1$/.test(unwrapped)) return "";
-  const deEmphasized = unwrapped
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/(^|[^\w])__([^\n]+?)__(?=$|[^\w])/g, "$1$2")
-    .replace(/\*([^*\n]+)\*/g, "$1")
-    .replace(/(^|[^\w])_([^\n]+?)_(?=$|[^\w])/g, "$1$2")
-    .trim();
-  if (/^(`+)[\s\S]*\1$/.test(deEmphasized)) return "";
-  return deEmphasized.replace(/`+/g, "").trim();
-}
-
-function assertionIsQualified(line, match) {
-  if (!match) return true;
-  const rawSuffix = line.slice(match.index + match[0].length).trim();
-  if (/^[?？]/.test(rawSuffix)) {
-    const answer = rawSuffix.replace(/^[?？]\s*/, "");
-    return !/^(?:yes|yep|correct|true|exactly|indeed|affirmative|是(?:的)?|对(?:的)?|正确|没错|确实)(?:\b|[。.!！]|$)/i.test(answer);
-  }
-  const suffix = rawSuffix
-    .replace(/^[\s`"'()[\]{}（）—–,:;.!。！？，；：-]+/, "")
-    .trim();
-  if (!suffix) return false;
-  return /^(?:if|unless|provided(?:\s+that)?|assuming|subject\s+to|only\s+(?:if|when|whenever|once|after|before|until)|would|could|should|will|may|might)\b/i.test(suffix)
-    || /^(?:(?:is|was)\s+)?(?:not\s+(?:(?:the\s+)?current|correct|true)|incorrect|wrong|invalid|false|hypothetical|outdated)\b/i.test(suffix)
-    || /^(?:isn['’]t|wasn['’]t)\s+(?:(?:the\s+)?current|correct|true|right)\b/i.test(suffix)
-    || /^(?:(?:is|was)\s+)?(?:(?:an?|the)\s+)?(?:(?:incorrect|wrong|invalid|hypothetical)\s+)?(?:example|illustration)\b/i.test(suffix)
-    || /^(?:for\s+(?:example|instance)|as\s+an?\s+example)\b/i.test(suffix)
-    || /^(?:does|do|did)\s+not\s+(?:mean|indicate|state)\b/i.test(suffix)
-    || /^(?:this|that|which)\s+(?:is|was)\s+(?:incorrect|wrong|invalid|false|not\s+(?:correct|true))\b/i.test(suffix)
-    || /^not\s+yet\b/i.test(suffix)
-    || /^(?:must|should)\s+not\b/i.test(suffix)
-    || /^(?:如果|若|假如|一旦|仅在|只有|前提是|才会|将会|可能|并不(?:正确|真实|表示|意味着)|并非(?:正确|真实|当前|如此)|不是(?:正确|真实|当前)|不(?:正确|对|代表|表示|意味着|是真的)|尚未|还未|不应|不能|例如|比如|是(?:一个|该|此)?(?:错|错误|不正确|不对|无效|假设)(?:的)?|是(?:一个|该|此)?(?:错误|不正确|无效|假设)?(?:示例|例子|反例))/.test(suffix);
-}
-
-function startsExampleScope(rawLine) {
-  const line = cleanText(rawLine)
-    .trim()
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/[*_]/g, "")
-    .trim();
-  return /^(?:for\s+(?:example|instance)|e\.g\.[,:]?|hypothetical|expected\s+output|(?:(?:incorrect|wrong|invalid|hypothetical)\s+)?examples?(?:\s+(?:output|section|table|below))?(?:\s*\((?:incorrect|wrong|invalid|hypothetical)\))?)\s*[:：]?$/i.test(line)
-    || /^(?:例如|比如|举例|譬如|示例输出|错误输出|假设(?:如下)?|以下(?:为|是)?\s*(?:错误|不正确|不对|无效|假设)?\s*(?:示例|例子|反例)|(?:(?:错误|不正确|不对|无效|假设)\s*)?(?:示例|例子|反例))\s*[:：]?$/.test(line);
-}
-
-function startsActualScope(rawLine) {
-  const line = cleanText(rawLine)
-    .trim()
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/[*_]/g, "")
-    .trim();
-  return /^(?:(?:actual|current|correct|corrected)\s+(?:status|state|answer|result)|conclusion)\s*[:：]?$/i.test(line)
-    || /^(?:(?:实际|当前|正确|更正后)(?:状态|阶段|答案|结果)|结论)\s*[:：]?$/.test(line);
-}
-
-function markdownTableCells(rawLine) {
-  const line = cleanText(rawLine).trim();
-  if (!line.includes("|")) return null;
-  const tableLine = line.replace(/^\|/, "").replace(/\|$/, "");
-  if (!tableLine.includes("|")) return null;
-  return tableLine.split("|").map((cell) => cell
-    .trim()
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/(^|[^\w])__([^\n]+?)__(?=$|[^\w])/g, "$1$2")
-    .replace(/\*([^*\n]+)\*/g, "$1")
-    .replace(/(^|[^\w])_([^\n]+?)_(?=$|[^\w])/g, "$1$2")
-    .replace(/`+/g, "")
-    .trim());
-}
-
-function markdownTableDivider(cells) {
-  return Array.isArray(cells)
-    && cells.length > 0
-    && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-}
-
-function assertionContextKind(line) {
-  if (/^(?:(?:incorrect|wrong|invalid|hypothetical)\s+(?:example|literal)|the\s+following\s+is\s+(?:incorrect|wrong|invalid|hypothetical)|examples?|example|for\s+(?:example|instance)|e\.g\.|expected\s+output)\s*[:：;,；，]?/i.test(line)
-    || /^(?:以下(?:内容|说法)?(?:是|为)?(?:错误|不正确|无效|假设))/.test(line)) {
-    return "example";
-  }
-  if (/^(?:(?:do\s+not|don't|never)\s+(?:claim|state|write|say|report)|if|unless|provided(?:\s+that)?|assuming|subject\s+to)\b/i.test(line)
-    || /^(?:不要|不得|切勿)(?:声称|写成|写为|表述|报告)?|^(?:如果|若|假如|一旦|仅在|只有|前提是)/.test(line)) {
-    return "qualified";
-  }
-  return null;
-}
-
-function maskedAssertionText(text) {
-  const characters = text.split("");
-  const masked = [...characters];
-  const bracketStack = [];
-  const bracketPairs = new Map([["(", ")"], ["[", "]"], ["{", "}"], ["（", "）"]]);
-  const quotePairs = new Map([["\"", "\""], ["“", "”"], ["‘", "’"], ["「", "」"], ["『", "』"]]);
-  let quoteEnd = null;
-  let backtickLength = 0;
-  const escapedAt = (index) => {
-    let slashes = 0;
-    for (let cursor = index - 1; cursor >= 0 && characters[cursor] === "\\"; cursor -= 1) {
-      slashes += 1;
-    }
-    return slashes % 2 === 1;
-  };
-
-  for (let index = 0; index < characters.length; index += 1) {
-    const character = characters[index];
-    if (backtickLength) {
-      masked[index] = " ";
-      if (character === "`") {
-        let run = 1;
-        while (characters[index + run] === "`") run += 1;
-        for (let offset = 1; offset < run; offset += 1) masked[index + offset] = " ";
-        if (run >= backtickLength) backtickLength = 0;
-        index += run - 1;
-      }
-      continue;
-    }
-    if (quoteEnd) {
-      masked[index] = " ";
-      const wordApostrophe = quoteEnd === "'"
-        && /[\p{L}\p{N}]/u.test(characters[index - 1] || "")
-        && /[\p{L}\p{N}]/u.test(characters[index + 1] || "");
-      if (character === quoteEnd && !escapedAt(index) && !wordApostrophe) quoteEnd = null;
-      continue;
-    }
-    if (bracketStack.length) {
-      masked[index] = " ";
-      if (bracketPairs.has(character)) bracketStack.push(bracketPairs.get(character));
-      else if (character === bracketStack[bracketStack.length - 1]) bracketStack.pop();
-      continue;
-    }
-    if (character === "`") {
-      let run = 1;
-      while (characters[index + run] === "`") run += 1;
-      for (let offset = 0; offset < run; offset += 1) masked[index + offset] = " ";
-      backtickLength = run;
-      index += run - 1;
-      continue;
-    }
-    if (quotePairs.has(character)) {
-      masked[index] = " ";
-      quoteEnd = quotePairs.get(character);
-      continue;
-    }
-    if (character === "'"
-      && !/[\p{L}\p{N}]/u.test(characters[index - 1] || "")) {
-      masked[index] = " ";
-      quoteEnd = "'";
-      continue;
-    }
-    if (bracketPairs.has(character)) {
-      masked[index] = " ";
-      bracketStack.push(bracketPairs.get(character));
-    }
-  }
-  return masked.join("");
-}
-
-function splitAssertionSegments(line, boundaryPattern) {
-  const masked = maskedAssertionText(line);
-  const segments = [];
-  let start = 0;
-  boundaryPattern.lastIndex = 0;
-  for (let match = boundaryPattern.exec(masked); match; match = boundaryPattern.exec(masked)) {
-    segments.push(line.slice(start, match.index));
-    start = boundaryPattern.lastIndex;
-  }
-  segments.push(line.slice(start));
-  return segments;
-}
-
-function explicitStateContradictions(context, message) {
-  const stageIds = context.policy.stage_order;
-  const gateIds = context.policy.gate_order;
-  const statuses = context.policy.state_contract.gate_statuses;
-  const stagePattern = regexAlternation(stageIds);
-  const gatePattern = regexAlternation(gateIds);
-  const statusAliases = new Map([
-    ...statuses.map((status) => [status.toLowerCase(), status.toLowerCase()]),
-    ["待审批", "pending"],
-    ["已批准", "approved"],
-    ["已通过", "approved"],
-    ["已重开", "reopened"],
+function structuredWorkflowAssertion(input) {
+  const direct = firstDefined(input, [
+    "workflow_assertions",
+    "workflowAssertions",
+    "assistant_workflow_state",
+    "assistantWorkflowState",
   ]);
-  const statusPattern = regexAlternation([...statusAliases.keys()]);
-  const englishStatusPattern = regexAlternation(statuses);
-  const chineseStatusPattern = regexAlternation(["待审批", "已批准", "已通过", "已重开"]);
-  const stageDeclaration = new RegExp(
-    `^(?:(?:the\\s+)?(?:current|active)(?:[-_\\s]+(?:(?:research|workflow)[-_\\s]+)?stage)|当前(?:研究|科研|工作流)?阶段)\\s*(?:[:：=]|\\bis\\b|为|是|[—–-])\\s*(${stagePattern})(?:\\b|\\s|[—–-]|[。.!]|$)`,
-    "i",
-  );
-  const explicitGateDeclaration = new RegExp(
-    `^(${gatePattern})(?:\\s+gate)?(?:\\s+status)?\\s*(?:[:：=]|\\bis\\b|为|是)\\s*[（(]?(${statusPattern})[）)]?(?=$|\\s|[。.!?？,，;；—–-])`,
-    "i",
-  );
-  const labeledEnglishGateDeclaration = new RegExp(
-    `^(${gatePattern})\\s+(?:gate(?:\\s+status)?|status)\\s+\\(?(${englishStatusPattern})\\)?(?=$|\\s|[.!?，,;；—–-])`,
-    "i",
-  );
-  const bareEnglishGateDeclaration = new RegExp(
-    `^(${gatePattern})\\s+(${englishStatusPattern})(?=$|[.!?，,;；—–-]|\\s+(?!(?:artifacts?|files?|outputs?|work|items?|content|manuscripts?|submissions?)\\b))`,
-    "i",
-  );
-  const bareChineseGateDeclaration = new RegExp(
-    `^(${gatePattern})(?:\\s+gate)?\\s+\\(?(${chineseStatusPattern})\\)?(?=$|[。！？，,;；—–-])`,
-    "i",
-  );
-  const parenthesizedGateDeclaration = new RegExp(
-    `^(${gatePattern})\\s*[（(](${statusPattern})[）)](?=$|\\s|[。.!?？,，;；—–-])`,
-    "i",
-  );
-  const gateToExitDeclaration = new RegExp(
-    `^(?:(?:the\\s+)?(?:gate\\s+to\\s+exit|next\\s+gate)|(?:下一道|退出)\\s*gate)\\s*(?:[:：=]|\\bis\\b|为|是|[—–-])\\s*(${gatePattern}|none|无)(?=$|\\s|[（(,，。.!—–-])\\s*(?:[（(](${statusPattern})[）)]|[,，]\\s*(?:currently|目前)?\\s*(?:is|为|是)?\\s*(${statusPattern})|[—–-]\\s*(${statusPattern}))?`,
-    "i",
-  );
-  const declarationStart = `(?:[*_]{1,2})?(?:current|active|the\\s+(?:current|active|next)|当前|下一道|退出|${gatePattern})(?:\\b|[-_\\s:：=（(—–])`;
-  const declarationBoundary = new RegExp(
-    `(?:[;；]+|[。.,，—–]\\s*)\\s*(?=${declarationStart})`,
-    "gi",
-  );
-  const independentSentenceBoundary = new RegExp(
-    `[.!?。！？]\\s*(?=${declarationStart})`,
-    "i",
-  );
-  const issues = new Set();
-  const actualStage = scalar(context.state.current_stage, "missing");
-  const spec = stageSpec(context);
-  const expectedExitGate = spec && typeof spec.gate_to_exit === "string"
-    ? spec.gate_to_exit
-    : "none";
-  let fenceMarker = null;
-  let exampleScope = false;
-  let exampleListMode = null;
-  let tableSpec = null;
+  return plainObject(direct) ? direct : null;
+}
 
-  const compareStage = (asserted) => {
-    if (asserted !== actualStage) {
-      issues.add(`The answer states current_stage=${asserted}; .research/state.json says ${actualStage}.`);
-    }
-  };
-  const compareGate = (gate, asserted) => {
-    const actual = scalar(gateStatus(context, gate), "missing");
-    if (asserted !== actual) {
-      issues.add(`The answer states ${gate}=${asserted}; .research/state.json says ${actual}.`);
-    }
-  };
-  const compareExitGate = (gate) => {
-    if (gate !== expectedExitGate) {
-      issues.add(`The answer states gate_to_exit=${gate}; policy and current_stage require ${expectedExitGate}.`);
-    }
-  };
-  const normalizeStatus = (status) => statusAliases.get(status.toLowerCase()) || "";
-  const normalizeGate = (gate) => gate.toLowerCase() === "无" ? "none" : gate.toLowerCase();
-
-  for (const rawLine of message.split("\n")) {
-    const normalizedRawLine = cleanText(rawLine);
-    if (/^(?: {4,}|\t)/.test(normalizedRawLine)) continue;
-    const fenceMatch = normalizedRawLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
-      if (!fenceMarker) {
-        fenceMarker = { character: marker[0], length: marker.length };
-      } else if (fenceMarker.character === marker[0]
-        && marker.length >= fenceMarker.length
-        && !fenceMatch[2].trim()) {
-        fenceMarker = null;
-      }
-      continue;
-    }
-    if (fenceMarker) continue;
-    const rawTrimmed = normalizedRawLine.trim();
-    if (startsExampleScope(rawLine)) {
-      exampleScope = true;
-      exampleListMode = null;
-      continue;
-    }
-    if (exampleScope) {
-      if (!rawTrimmed) continue;
-      if (startsActualScope(rawLine)) {
-        exampleScope = false;
-        exampleListMode = null;
-        continue;
-      }
-      const isHeading = /^\s*#{1,6}\s+/.test(cleanText(rawLine));
-      const isListItem = /^(?:[-*+]\s+|\d+[.)]\s+)/.test(rawTrimmed);
-      if (isHeading) {
-        exampleScope = false;
-        exampleListMode = null;
-      } else if (exampleListMode === null) {
-        exampleListMode = isListItem;
-        continue;
-      } else if (exampleListMode === true && !isListItem) {
-        exampleScope = false;
-        exampleListMode = null;
-      } else {
-        continue;
-      }
-    }
-
-    const line = assertionLine(rawLine);
-    if (!line) continue;
-    const tableCells = markdownTableCells(rawLine);
-    if (tableCells) {
-      if (markdownTableDivider(tableCells)) continue;
-      const normalizedCells = tableCells.map((cell) => cell.toLowerCase().replace(/\s+/g, " "));
-      const gateIndex = normalizedCells.findIndex((cell) => /^(?:gate(?: id)?|门禁)$/.test(cell));
-      const statusIndex = normalizedCells.findIndex((cell) => /^(?:status|(?:current|actual)(?: gate)? status|(?:当前|实际)(?:gate)?状态)$/.test(cell));
-      const fieldIndex = normalizedCells.findIndex((cell) => /^(?:field|item|字段|项目)$/.test(cell));
-      const valueIndex = normalizedCells.findIndex((cell) => /^(?:(?:current|actual) (?:value|status|state)|(?:当前|实际)(?:值|状态))$/.test(cell));
-      if (gateIndex >= 0 && statusIndex >= 0) {
-        tableSpec = { kind: "gate", keyIndex: gateIndex, valueIndex: statusIndex };
-        continue;
-      }
-      if (fieldIndex >= 0 && valueIndex >= 0) {
-        tableSpec = { kind: "field", keyIndex: fieldIndex, valueIndex };
-        continue;
-      }
-      if (gateIndex >= 0 || fieldIndex >= 0) {
-        tableSpec = null;
-        continue;
-      }
-      if (tableSpec
-        && tableSpec.keyIndex < tableCells.length
-        && tableSpec.valueIndex < tableCells.length) {
-        const key = tableCells[tableSpec.keyIndex].trim();
-        const value = tableCells[tableSpec.valueIndex].trim();
-        if (tableSpec.kind === "gate") {
-          const gate = normalizeGate(key);
-          const statusMatch = value.match(new RegExp(`^[（(]?(${statusPattern})[）)]?$`, "i"));
-          if (gateIds.includes(gate) && statusMatch) compareGate(gate, normalizeStatus(statusMatch[1]));
-        } else if (/^(?:current[-_\s]+stage|当前(?:研究|科研|工作流)?阶段)$/i.test(key)) {
-          const asserted = value.toLowerCase();
-          if (stageIds.includes(asserted)) compareStage(asserted);
-        } else {
-          const gate = normalizeGate(key);
-          const statusMatch = value.match(new RegExp(`^[（(]?(${statusPattern})[）)]?$`, "i"));
-          if (gateIds.includes(gate) && statusMatch) compareGate(gate, normalizeStatus(statusMatch[1]));
+function structuredStateContradictions(context, assertion) {
+  const issues = [];
+  if (Object.prototype.hasOwnProperty.call(assertion, "current_stage")
+    && assertion.current_stage !== context.state.current_stage) {
+    issues.push(`structured current_stage=${JSON.stringify(assertion.current_stage)}; state says ${JSON.stringify(context.state.current_stage)}`);
+  }
+  const exit = stageExitRequirement(context.policy, context.state.current_stage);
+  const expectedExit = exit ? gateRefObject(exit.gate, exit.target) : null;
+  if (Object.prototype.hasOwnProperty.call(assertion, "stage_exit_requirement")
+    && stableReference(assertion.stage_exit_requirement) !== stableReference(expectedExit)) {
+    issues.push(`structured stage_exit_requirement=${JSON.stringify(assertion.stage_exit_requirement)}; policy says ${JSON.stringify(expectedExit)}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(assertion, "gate_to_exit")) {
+    issues.push("structured gate_to_exit is obsolete; use stage_exit_requirement");
+  }
+  if (Object.prototype.hasOwnProperty.call(assertion, "gates")) {
+    if (!plainObject(assertion.gates)) {
+      issues.push("structured gates must be an object");
+    } else {
+      for (const [label, status] of Object.entries(assertion.gates)) {
+        const [gate, targetValue, ...extra] = label.split("/");
+        const target = targetValue || null;
+        if (extra.length || !gateRefOwner(context.policy, gate, target)) {
+          issues.push(`structured gates contains unknown GateRef ${label}`);
+          continue;
+        }
+        const actual = gateStatus(context, gate, target);
+        if (status !== actual) {
+          issues.push(`structured ${label}=${JSON.stringify(status)}; state says ${JSON.stringify(actual)}`);
         }
       }
-      continue;
-    }
-    tableSpec = null;
-
-    const contextKind = assertionContextKind(line);
-    if (contextKind === "example"
-      || (contextKind && !independentSentenceBoundary.test(maskedAssertionText(rawLine)))) continue;
-    for (const rawSegment of splitAssertionSegments(rawLine, declarationBoundary)) {
-      const segment = assertionLine(rawSegment);
-      if (!segment) continue;
-      const stageMatch = segment.match(stageDeclaration);
-      if (stageMatch && !assertionIsQualified(segment, stageMatch)) {
-        compareStage(stageMatch[1].toLowerCase());
-      }
-
-      const exitMatch = segment.match(gateToExitDeclaration);
-      if (exitMatch && !assertionIsQualified(segment, exitMatch)) {
-        const gate = normalizeGate(exitMatch[1]);
-        const assertedStatus = normalizeStatus(exitMatch[2] || exitMatch[3] || exitMatch[4] || "");
-        compareExitGate(gate);
-        if (assertedStatus && gateIds.includes(gate)) compareGate(gate, assertedStatus);
-        continue;
-      }
-
-      const gateMatch = segment.match(explicitGateDeclaration)
-        || segment.match(labeledEnglishGateDeclaration)
-        || segment.match(bareEnglishGateDeclaration)
-        || segment.match(bareChineseGateDeclaration)
-        || segment.match(parenthesizedGateDeclaration);
-      if (gateMatch && !assertionIsQualified(segment, gateMatch)) {
-        compareGate(gateMatch[1].toLowerCase(), normalizeStatus(gateMatch[2]));
-      }
     }
   }
-  return [...issues];
+  return issues;
 }
 
 function stopAudit(context, input) {
   if (getStopHookActive(input)) return {};
-  const message = lastAssistantMessage(input);
-  if (!message.trim()) return {};
   const stateCheck = validateState(context);
   if (stateCheck.errors.length) {
     return {
       continue: true,
       systemMessage: bounded([
-        "[RESEARCH STOP OBSERVER] The active .research state failed mechanical validation, so this non-blocking observer did not compare workflow claims.",
+        "[RESEARCH STOP OBSERVER] Active research state failed mechanical validation.",
         listLines(stateCheck.errors.slice(0, 4)),
-        "Run researchctl doctor before relying on stage or Gate statements. No additional model turn was requested.",
+        "Run researchctl doctor before relying on stage or Gate metadata. The assistant response was not parsed or replaced.",
       ].join("\n"), MAX_STOP_REASON_CHARS),
     };
   }
-  const contradictions = explicitStateContradictions(context, message);
-  if (contradictions.length) {
-    const reason = bounded([
-      "The Stop observer found an explicit mechanical contradiction with .research/state.json or the canonical policy:",
+  const assertion = structuredWorkflowAssertion(input);
+  if (!assertion) return {};
+  const contradictions = structuredStateContradictions(context, assertion);
+  if (!contradictions.length) return {};
+  return {
+    decision: "block",
+    reason: bounded([
+      "Explicit structured workflow metadata contradicts .research/state.json or policy.yaml:",
       listLines(contradictions),
-      "Treat the preceding response as a draft and return one complete, self-contained corrected answer. Preserve supported content, correct only the listed contradiction, and do not return a standalone audit addendum or private chain-of-thought.",
-      "This Hook requests one necessary continuation; stop_hook_active prevents another Stop loop.",
-    ].join("\n"), MAX_STOP_REASON_CHARS);
-    return { decision: "block", reason };
-  }
-  const firstAssertion = message.split("\n").map(assertionLine).find(Boolean) || "";
-  if (/^\[Stop Hook Review\]/i.test(firstAssertion)) {
-    return {
-      continue: true,
-      systemMessage: "[RESEARCH STOP OBSERVER] The response begins with the legacy standalone [Stop Hook Review] marker. This non-blocking observer did not request another model turn; if the main answer is missing, regenerate it in full.",
-    };
-  }
-  return {};
+      "Return one self-contained corrected answer. stop_hook_active prevents a repeat loop.",
+    ].join("\n"), MAX_STOP_REASON_CHARS),
+  };
 }
 
 function handleEvent(event, context, input) {
+  if (!context.policy) {
+    return event === "PreToolUse" ? invalidPolicyPreToolUse(context, input) : {};
+  }
   switch (event) {
     case "SessionStart":
       return hookContextOutput("SessionStart", sessionContext(context));
     case "UserPromptSubmit":
-      return clearlyCodeOnlyPrompt(input)
-        ? {}
-        : hookContextOutput("UserPromptSubmit", promptContext(context));
+      return hookContextOutput("UserPromptSubmit", promptContext(context));
     case "PreToolUse":
       return preToolUse(context, input);
     case "PostToolUse":

@@ -23,13 +23,16 @@
 ```text
 Codex Plugin
 ├── Skill: $research                 唯一对话入口与阶段路由
-├── Rules: references/policy.yaml    唯一流程、Gate 和退出条件
-├── Command: scripts/researchctl.py  唯一状态与 Gate 写入口
+├── Rules: references/policy.yaml    唯一流程、artifact role、Gate 和退出条件
+├── Schema: assets/runtime-contract.json  Python/Hook/template 共用机器结构
+├── Command: scripts/researchctl.py  唯一状态、revision 与 Gate 写入口
 ├── Hooks                            项目上下文、工具边界、停止前复核
 └── Project data: .research/         当前项目的本地状态、记忆与工作流产物
 ```
 
-`scripts/researchctl.py` 保持为唯一公开命令与写入口；实现层位于私有 `scripts/researchctl_core/`，按共享 schema/常量、policy、state store/validation、migration、artifact registry、Gate engine/validation、workspace checks、doctor aggregation、command orchestration 和 CLI 分模块。依赖方向单向汇入 doctor、commands 与 CLI，不增加第二套 state、schema 或写入口。
+`scripts/researchctl.py` 是唯一公开命令与 state 写入口。`policy.yaml` 定义科研工作流，`runtime-contract.json` 定义固定机器 schema；Python、Hook 与 state template 共同消费后者，不增加第二套 state 或写入口。
+
+已接受的维护者设计决策记录在 [`decisions/`](decisions/)，当前术语与“已实现／仅意图／明确延期”的能力区别见 [`decisions/glossary.md`](decisions/glossary.md)。这些文件不属于 Plugin runtime 或项目研究状态。
 
 ## 六阶段与四个 Gate
 
@@ -43,16 +46,24 @@ Codex Plugin
 
 `release` 是同一个 Gate 的两个发布目标：首次批准 `initial_submission` 后进入 Revision；返修完成后，还要针对 `revision_rebuttal` 再次明确批准。Gate 批准只记录决策与绑定证据，不会代替研究者执行投稿或发布。
 
+一个 workspace 对应一篇论文的一条研究主线，主线由研究问题与预期核心贡献共同界定。`release` 是可重复事件，不等于项目完成；研究者可从任意阶段有证据地 `terminate`，或在论文周期确实结束后 `complete`。两种终态都只读保护并保留阶段与历史，只有同一主线可显式 `reopen`；新论文或核心贡献变化使用新的 workspace。跨 workspace 只按值复制并重新登记数据及 provenance，不继承任何 Gate、claim 或 lifecycle 判断。
+
 | 阶段                 | 主要职责                                                           |
 | -------------------- | ------------------------------------------------------------------ |
-| Idea                 | 生成候选、反证、可行性判断、预测与 kill criteria                   |
+| Idea                 | 在一份 portfolio 中生成、比较、淘汰并选择候选                     |
 | Literature           | 背景搜索、closest work、证据矩阵、novelty 边界与 idea 迭代         |
-| Method               | 假设、数学定义、模块接口、算法与可检验预测                         |
+| Method               | 在一份 approval package 中比较方法并形式化所选方法                 |
 | Experiment + Results | 基线、实验矩阵、执行记录、失败诊断、统计分析与 Claim—Evidence 对齐 |
 | Paper                | 结构、写作、数字与引用追溯、自审、编译和投稿检查                   |
 | Revision             | reviewer concern、补充证据、论文修改与逐点回复闭环                 |
 
-文献阶段可以调用项目可用的学术检索系统，但以 provider-neutral 的 search-run manifest、允许保留时的原始结果 Hash（否则记录不可保留原因）、筛选和 passage-level evidence 为审计边界。计算实验优先兼容 W&B：W&B 负责实时曲线、sweep 和协作查看，本地 `run_registry` 与导出 Hash 才是 Gate 可依赖的权威记录；没有 W&B 时可使用现有 tracker 或纯本地记录。论文阶段显式声明 LaTeX/BibTeX 或 Biber 构建链，执行 clean build、保留日志并检查渲染 PDF，不把某个模板、引擎或目录结构写死。
+Idea 和 Method 都允许在 Gate 前保留多个候选。候选使用稳定 ID、parent lineage 和 `active`、`shortlisted`、`selected`、`rejected`、`falsified` 状态，并保留支持/反对证据、kill criteria 与选择或淘汰理由。`idea_freeze --selected-id IDEA-003` 和 `method_experiment_approval --selected-id METHOD-002` 记录的是 portfolio 内部的科研候选 ID；Gate 另行绑定唯一 portfolio artifact 的当前 revision。runtime 不解析科研 Markdown，也不会替研究者判断候选是否存在、是否新颖或是否值得选择。
+
+项目只有一套全局 `current_stage` 与 GateRef，不是多分支引擎。transition、reopen、cascade 与 release target 以 [`policy.workflow_graph` 和 `policy.gates`](skills/research/references/policy.yaml) 为唯一语义来源，机器历史字段以 [`runtime-contract.json`](skills/research/assets/runtime-contract.json) 为准。
+
+artifact revision、snapshot、稳定 ID/path 和 manifest 规则只由 `policy.artifact_layout` 定义；各阶段 reference 只说明本阶段 artifact 的科学内容与更新时机。
+
+文献检索保持 provider-neutral 的 search-run、raw-snapshot Hash、筛选和 passage-level evidence 契约；论文阶段继续显式声明构建与 bibliography toolchain，保留 clean-build 日志并检查渲染输出，不把某个数据库、tracker、模板、引擎或目录结构写死。
 
 ## 安装
 
@@ -96,13 +107,23 @@ Use $research to initialize this repository and report the current research stag
 
 ```text
 .research/
-├── state.json      # 阶段、Gate、artifact 指针和检查点
+├── state.json      # lifecycle、监管开关、阶段、Gate、revision 与检查点
 ├── memory.md       # 研究内核、事实、决策、失败经验和下一步
-└── artifacts/      # Plugin 新建的工作流产物
-    └── <stage-id>/ # 按需创建的阶段目录
+├── artifacts/      # 稳定 working artifact
+│   └── <stage-id>/ # 按阶段维护，路径不随 revision 改名
+└── snapshots/      # register 自动生成的不可变完整 revision
+    └── <stage-id>/ # 不手工编辑
 ```
 
-`.research/` 默认写入当前 clone 的 `.git/info/exclude`，因此其中的状态、记忆和新建工作流产物都不提交 Git、也不跨服务器同步。`init` 是幂等的，不覆盖已有 state 或 memory；若现有 state 已禁用，使用 `researchctl enable` 重新启用。已有源码、论文、数据和运行输出保留在原位置，通过 artifact 指针登记，不为了满足布局而复制。升级时也不会自动迁移旧 `research/`、`contracts/` 或 `artifacts/` 中已经登记的产物，以免破坏路径、Hash 和 Gate 历史；只有后续新建的工作流产物使用新布局。
+`.research/` 默认写入当前 clone 的 `.git/info/exclude`，因此状态、记忆、working artifacts 与 snapshots 都不提交 Git、也不跨服务器同步。`init` 是幂等的，不覆盖兼容的 state 或 memory；若现有 state 已禁用，使用 `researchctl enable --reason "恢复 Plugin 监管"`。已有源码、论文和小型结果可以保留在原位置作为稳定 source path；其 registered revisions 由 `researchctl` 保存完整 snapshots，不要求把 working file 搬进 `.research/artifacts/`。
+
+v2 不迁移 v1 state。升级前先人工保全仍需使用的研究材料；然后删除旧项目的整个 `.research/`，使用 v2 `researchctl init` 重新初始化，并按新契约重新登记 canonical artifacts。不要把 v1 Gate approval 当作 v2 approval，也不要手工改写旧 state 来伪造迁移。
+
+```bash
+# 仅在已保全所需材料并确认当前 runtime 为 v2 后执行
+rm -rf .research
+python3 /path/to/Scientific-Research-Skill/scripts/researchctl.py init
+```
 
 `.research` 中需要人工审核的中间产物、持久化 memory、checkpoint summary 和 Gate reason 默认采用中文骨干。论文、返修回复、代码及注释等正式输出保持英文；JSON/YAML 字段、ID、枚举、路径、命令、公式、原始引文、书目信息和原始日志保持英文或原文。该规则只影响后续新写内容，不翻译或重写已有 artifact。
 
@@ -116,48 +137,72 @@ Use $research to initialize this repository and report the current research stag
 researchctl init
 researchctl status
 researchctl status --json
-researchctl enable
-researchctl disable
+researchctl enable --reason "恢复 Plugin 监管"
+researchctl disable --reason "临时退出 Plugin 监管"
+# 下列数组是每条 Gate/lifecycle 根决策都必须携带的结构化答辩参数
+decision_review=(
+  --supporting-evidence-id EVID-001
+  --decision-condition "证据边界改变时停止或重开"
+)
 researchctl artifact register idea_card \
-  --stage idea --path .research/artifacts/idea/idea-card-v1.yaml \
-  --artifact-id IDEA-CARD-001 --version 1 --status approval-ready
-researchctl gate approve idea_freeze --reason "已核对最近工作、可行性与否证条件"
-researchctl gate reopen claim_freeze --reason "新评估结果使冻结表述失效"
+  --stage idea --path .research/artifacts/idea/idea-portfolio.md \
+  --artifact-id IDEA-PORTFOLIO-001
+researchctl gate approve idea_freeze --selected-id IDEA-003 \
+  --reason "人工选择 IDEA-003；已核对最近工作、可行性与否证条件" \
+  "${decision_review[@]}"
+researchctl artifact register approval_package \
+  --stage method --path .research/artifacts/method/method-approval-package.md \
+  --artifact-id METHOD-PORTFOLIO-001
+researchctl gate approve method_experiment_approval --selected-id METHOD-002 \
+  --reason "人工选择 METHOD-002；已核对方法合同与实验设计" \
+  "${decision_review[@]}"
+researchctl gate approve claim_freeze --retrospective-revision-import \
+  --reason "人工确认：这是工作流启用前已完成稿件的返修接入，并接受已记录的历史证据缺口" \
+  "${decision_review[@]}"
+researchctl gate reopen claim_freeze --reason "新评估结果使冻结表述失效" "${decision_review[@]}"
+researchctl gate approve release --target initial_submission --reason "人工批准首次投稿包" "${decision_review[@]}"
+researchctl gate approve release --target revision_rebuttal --reason "人工批准返修回复包" "${decision_review[@]}"
+researchctl lifecycle terminate --reason "证据支持停止该研究主线" "${decision_review[@]}"
+researchctl lifecycle complete --reason "研究者确认论文周期结束" "${decision_review[@]}"
+researchctl lifecycle reopen --gate claim_freeze --reason "新证据影响冻结 Claim" "${decision_review[@]}"
 researchctl checkpoint --summary "基线已复现，下一步运行所提方法"
 researchctl checkpoint --summary "开始执行已登记的文献检索" --stage literature
+researchctl dashboard
+researchctl dashboard --verify
+researchctl dashboard --open
 researchctl doctor
 ```
 
-canonical artifact 通过 `artifact register` 登记到对应的 `stage.role`；其中 stage 传给 `--stage`，role 作为位置参数。Plugin 新建的工作流产物按 `policy.yaml` 统一放在 `.research/artifacts/<stage-id>/`，不再创建项目根目录的 `research/`、`contracts/` 或 `artifacts/`。命令自动计算文件 SHA-256，并保留 ID、版本和描述性状态；`--status` 默认是 `current`，不表示 Gate 已批准。`.research/state.json`、`.research/memory.md` 等控制元数据不能登记为科研证据。
+`dashboard` 按需原子生成 `.research/dashboard.html`：这是一个离线、只读的 state 投影，展示 lifecycle、监管开关历史、六阶段焦点、合法回退、Gate 与 release target、机械缺失角色、artifact 当前 revision 和历史时间线；项目记忆仍只存在 `.research/memory.md`。默认只做结构检查；`--verify` 同时核验 revision snapshots 与 Hash，`--open` 在生成后尝试用默认浏览器打开。页面不写 state、不审批 Gate，也不判断 novelty 或科研充分性；状态变化后重新运行该命令即可刷新。
 
-所有修改 state 的命令都通过 `.research/state.lock` 串行化完整的读取、校验和原子替换事务，避免并行 agent 静默覆盖彼此的更新。该 lock 也是控制元数据，不能登记为证据或直接修改。
+artifact、revision、snapshot、cardinality 与大文件 manifest 的唯一语义合同在 [`policy.artifact_layout`](skills/research/references/policy.yaml)；机器字段与限制在 [`runtime-contract.json`](skills/research/assets/runtime-contract.json)。公共写入只通过 `researchctl`，`.research/state.json`、lock、memory 和派生 Dashboard 都不是科研证据。
 
-`policy.yaml` 中的 Gate role 覆盖各阶段 reference 明列的 canonical 交付物；同一现有文件可以映射到多个 role，不要求复制。原始 run、analysis 和大体量输出可由已登记的 registry 或 manifest 间接追溯，但其中必须记录稳定 ID、路径和 checksum；`researchctl` 只验证 registry/manifest 文件本身，引用文件的 checksum 仍由对应阶段实际核验。登记不复制或备份文件，已批准版本必须保留在稳定的版本化路径。
+Gate、GateRef、stage transition、release target 与条件化 approval mode 同样只由 policy 定义，decision/cascade 的机器形状只由 runtime contract 定义。`contract_version: 2.0` 的 writer-owned 字段与分支枚举会在加载时 fail closed；可选 decision 字段可以向后兼容扩展，破坏性字段改名或删除必须升级 contract version 与 runtime，不能先加载成功再在 writer/doctor 阶段失败。CLI 的通用入口是 `--approval-mode <policy-key>`；`--retrospective-revision-import` 只是由 policy `cli_flag` 生成的兼容别名，不再决定内部 mode ID。README 只展示命令，不复制这些规则。
 
-Gate 只能通过该命令更新。每条 decision 记录 action、前后状态、理由和 UTC 时间；批准前，`researchctl` 按 `policy.yaml` 验证必需 artifact role 的文件与 hash，并把这些指针复制进 decision，避免后续 state 变化抹掉批准依据。批准后是否推进阶段由 policy 的 `advance_to` 决定；非 Gate 阶段切换使用 `checkpoint --stage`，同样必须符合 `allowed_transitions` 及其 Gate 前置条件。
+只有 policy 中的窄资格成立且研究者明确授权时，才加载[返修兼容步骤](skills/research/references/retrospective-revision-import.md)；它不是通用导入、Gate 继承或 Hash 绕过。
 
-`release` 第一次在 `paper` 阶段批准时记录 `initial_submission` 并进入 `revision`；修改已批准的稿件前必须先重开 `release`，重开后仍停留在 `revision`；再次批准时记录 `revision_rebuttal`。已被批准的 artifact role 在 Gate 重开前不能替换；已批准路径不能用不同内容原地复用，同一 `artifact_id@version` 也不能重新绑定到另一组路径、Hash 或元数据。
-
-`doctor` 校验 schema/workflow 版本、UTC 时间与历史连续性、阶段、Gate 状态机、当前 artifact、已批准 Gate 与其当前 artifact 绑定、历史 Gate 引用的路径和 SHA-256，以及本地排除设置。当前 Gate 所需文件缺失或 hash 失配会阻止批准；历史批准文件遗失或改变会持续给出 audit warning，但在明确重开 Gate、以新路径登记新版本后不会永久阻断后续批准。旧式裸路径继续作为兼容输入并给出 warning，但不能满足新的 Gate artifact 要求。若发现旧 `.research/project-state.yaml`，只做保守迁移：保留旧文件，不根据旧文本或模型判断伪造批准。
+`doctor` 校验 schema/workflow、UTC 时间与历史连续性、阶段、Gate 状态机、artifact current revision、完整 revision history、snapshot 路径和 SHA-256、Gate 绑定以及本地排除设置。缺失或被修改的 current/historical snapshot 都是审计错误；修复方式是恢复对应 snapshot，不能用新内容冒充旧 revision。v1 state 与旧裸路径格式不兼容，v2 不做自动迁移。
 
 ## Hook 约束
 
 | 事件               | 行为                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------- |
-| `SessionStart`     | 只注入项目已启用、当前阶段和 state 权威等最小边界                                       |
-| `UserPromptSubmit` | 按 prompt 分流；对研究相关请求注入当前阶段合同与 `policy.yaml` 语义自检，要求在首次回答中直接给出完整答复 |
+| `SessionStart`     | 只注入项目身份、启用状态以及 state/policy 的权威来源                                    |
+| `UserPromptSubmit` | 对活跃项目的每个 prompt 只注入最新 `current_stage` 与退出 Gate 事实；语义相关性由模型判断 |
 | `PreToolUse`       | 对支持的工具入口拦截危险命令、直接写 Gate state 和可机械判断的越界                       |
 | `PostToolUse`      | 在状态被触及时执行快速结构检查；完整路径与 Hash 审计仍以 `researchctl doctor` 为准          |
 | `Stop`             | 默认非阻塞，只做可机械验证的 state/Gate 一致性检查；状态异常用 `systemMessage` 告警，仅对已确认矛盾触发一次完整重答 |
 
-研究相关 prompt 的语义自检发生在首次回答生成前，模型应把必要修正直接整合进一份完整答复，不输出独立的 `[Stop Hook Review]`。`Stop` 无问题时返回空结果，不再因为普通科研结论、指标或交付物触发续答；`systemMessage` 只进入 UI/事件流，不调用模型或改写 assistant 回答。只有回答中显式写出的 `current_stage`、退出 Gate 或 canonical Gate status 与有效 state/policy 直接矛盾时，才使用 `decision: "block"` 请求一次完整修正版；该 continuation 不承诺保留或自动拼接前一版回答。Prompt 分流不是权限旁路，`PreToolUse` 的机械边界始终生效。单个 Hook 输入 envelope 和 `state.json` 的解析上限均为 8 MiB；超限或畸形输入按无有效激活上下文处理并返回空结果，因此 Hook 是有限的机械 guardrail，不是安全边界。novelty、实验充分性和论证质量仍属于模型辅助判断，Hook 不声称覆盖所有 shell 绕行、外部程序或科研错误，完整状态与 Hash 审计仍以 `researchctl doctor` 为准。
+`UserPromptSubmit` 不维护代码/科研语义分类正则，也不重复展开阶段禁止项、artifact 规则或 `semantic_audit`。`$research` Skill 会先判断请求是否解释或改变科研 state、artifact、evidence、claim 或 decision；普通代码与仓库维护不加载 numbered stage reference，科研工作才按 canonical policy 加载当前阶段 reference。这个分流仍是模型行为：确定性测试只能证明 Hook 上下文很短和 Skill 路由文本存在，不能替代真实模型对普通代码、混合请求与科研请求的 A/B 验证。`Stop` 无问题时返回空结果，不再因为普通科研结论、指标或交付物触发续答；`systemMessage` 只进入 UI/事件流，不调用模型或改写 assistant 回答。只有回答中显式写出的 `current_stage`、退出 Gate 或 canonical Gate status 与有效 state/policy 直接矛盾时，才使用 `decision: "block"` 请求一次完整修正版；该 continuation 不承诺保留或自动拼接前一版回答。`PreToolUse` 的机械边界始终生效。单个 Hook 输入 envelope 和 `state.json` 的解析上限均为 8 MiB；超限或畸形输入按无有效激活上下文处理并返回空结果，因此 Hook 是有限的机械 guardrail，不是安全边界。novelty、实验充分性和论证质量仍属于模型辅助判断，Hook 不声称覆盖所有 shell 绕行、外部程序或科研错误，完整状态与 Hash 审计仍以 `researchctl doctor` 为准。
+
+若项目 state 明确 `enabled=true`，但 Plugin 内 canonical policy 或 runtime contract 缺失、损坏，context-only Hook 保持安静，`PreToolUse` 则保守拒绝写操作、实验启动和外部发布，只放行只读检查与 `researchctl status|doctor|disable` 诊断；无效 authority 绝不会使已有 Gate approval 被视为可信。
 
 ## 更新与多服务器使用
 
 - 每台服务器各自安装 Plugin，并各自在需要的项目中初始化 `.research/`。
 - Plugin 代码与规则通过 GitHub marketplace 分发；各主机刷新 marketplace 并重新安装新版本后，再新建 thread。若 Hook 发生变化，还要重新检查信任。
-- 项目 memory 与 `.research/artifacts/` 不同步。若同一 Git 项目在另一台服务器使用，应在该 clone 中重新 `init`，再由研究者决定迁移哪些本地事实、工作流产物和 Gate。
-- Plugin package version 用于分发和缓存；`state.json` 中的 workflow version 只在 policy 或状态契约不兼容时变化。更新后先运行 `researchctl doctor`；若旧工作区提示缺少 `.research/artifacts/`，重新执行幂等的 `researchctl init` 补齐目录后再检查。
+- 项目 memory、`.research/artifacts/` 与 `.research/snapshots/` 不同步。若同一 Git 项目在另一台服务器使用，应在该 clone 中重新 `init`，再由研究者决定迁移并重新登记哪些本地事实和产物；Gate approval 不会自动跨工作区继承。
+- Plugin package version 用于分发和缓存；policy 的 workflow version 与 runtime contract 的 state schema version 分别管理流程和机器结构兼容性。v2 workflow 不读取 v1 state；升级工作区按“保全材料、删除旧 `.research/`、重新 `init`、重新登记与审批”的流程处理。
 
 ## 仓库开发与验证
 

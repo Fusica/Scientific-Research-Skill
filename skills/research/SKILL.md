@@ -1,57 +1,35 @@
 ---
 name: research
-description: Orchestrate evidence-grounded research from idea generation and literature review through method design, experiments, result synthesis, paper production, and reviewer revision. Use when substantial CS, ML, reinforcement-learning, LLM, robotics, or UAV research work benefits from project-local state, explicit evidence, reproducible artifacts, claim traceability, and human approval gates.
+description: "Operate an explicitly enabled, project-local scientific research workflow with evidence, reproducible artifacts, claim traceability, and human approval Gates. Use only when the user invokes `$research` or the current repository already has `.research/state.json` with `enabled: true`; do not activate for ordinary coding, one-off writing, or general research questions outside that boundary."
 ---
 
 # Research
 
-Run one recoverable research workflow from project state. Keep scientific evidence in canonical project artifacts and keep only bounded navigation memory in `.research/memory.md`.
+Operate one recoverable research workflow from project-local state.
 
-## Enter through project state
+## Enter and route
 
-1. Resolve the current project root from the active workspace or repository. Do not search an unrelated parent directory for research state.
-2. Resolve the plugin root as two parent directories above this `SKILL.md`. Map every `researchctl` instruction, including a user's conversational use of that name, to `python3 <plugin-root>/scripts/researchctl.py ...`. Never assume the command is installed on `PATH`.
-3. Read `references/policy.yaml` completely. It is the sole workflow and Gate policy.
-4. Check `<project-root>/.research/state.json`.
-   - If it is absent, say that the research workflow is not enabled for this project and suggest `researchctl init`. Do not initialize implicitly.
-   - If `enabled` is `false`, say that it is disabled and suggest `researchctl enable`. Do not apply the staged workflow.
-   - If it is invalid or incompatible, stop workflow actions and run or suggest `researchctl doctor`.
-5. Read `.research/memory.md` and only the canonical artifacts referenced by state that matter to the request. Never read or write Codex global memory for this workflow.
+1. Resolve the active project root; never search an unrelated parent for research state. Check `<project-root>/.research/state.json` before loading references.
+   - If absent, disabled, invalid, or incompatible, do not apply the workflow. Suggest the corresponding `researchctl init`, `enable --reason "..."`, or `doctor` action; initialize or enable only when authorized.
+   - If lifecycle is terminal, follow `policy.workspace_lifecycle.terminal_access`; do not load a stage execution reference or advance research.
+2. Resolve `<plugin-root>` from this file at `<plugin-root>/skills/research/SKILL.md`. Expand every `researchctl` instruction to `python3 <plugin-root>/scripts/researchctl.py ...`; never assume it is on `PATH`.
+3. Classify the request before loading stage material.
+   - For ordinary code or repository maintenance that neither interprets nor changes research state, research artifacts, evidence, claims, or decisions, do not load a numbered stage reference. Hooks still apply their mechanical protections.
+   - For scientific workflow work, read only the needed slices of `references/policy.yaml`: the relevant transition, current stage, artifact, Gate, lifecycle, and authority contracts. Then read the one reference named by `policy.stages[current_stage].reference` completely. Use another stage only through a policy transition.
+4. Read `.research/memory.md` and registered artifacts only as needed. Memory is navigation, never evidence or approval authority. Read `assets/runtime-contract.json` only when diagnosing or changing machine state/schema behavior.
 
-## Select one stage
+Load `references/retrospective-revision-import.md` only after the user explicitly requests that policy mode and confirms its eligibility facts.
 
-Treat `current_stage` as the default stage. Choose the smallest stage that answers the request, then read its reference completely:
+## Execute within the boundary
 
-| Stage | Reference | Primary work |
-| --- | --- | --- |
-| `idea` | `references/01-idea.md` | Generate, challenge, select, and freeze an idea |
-| `literature` | `references/02-literature.md` | Search, verify, compare closest work, and update the idea |
-| `method` | `references/03-method.md` | Formalize assumptions, equations, algorithms, interfaces, and predictions |
-| `experiment_results` | `references/04-experiment-results.md` | Design and run experiments, analyze outputs, and promote claims |
-| `paper` | `references/05-paper.md` | Assemble and verify an evidence-backed manuscript |
-| `revision` | `references/06-revision.md` | Resolve reviews, revise artifacts, and prepare responses |
+- `references/policy.yaml` alone defines workflow, transitions, artifact roles, Gate requirements, approval modes, cascade, lifecycle, and authority. Numbered references describe scientific execution and must not override it.
+- Label evidence, interpretation, assumptions, exploratory findings, and unknowns. Preserve supporting, opposing, failed, null, negative, excluded, and contradictory evidence with reasons. Never fabricate sources, results, metadata, behavior, checks, decisions, or completed actions.
+- Give material research objects stable IDs. Follow `policy.artifact_layout` for stable working files, immutable revisions, snapshots, cardinality, and large-file manifests.
+- Make artifact, Gate, lifecycle, activation, and checkpoint changes only through `researchctl`; never edit control fields directly. Gate and lifecycle decisions require explicit human direction and the structured review fields required by policy. Never infer approval.
+- When evidence invalidates an approved boundary, reopen the earliest affected GateRef named by policy before changing protected material. Let `researchctl` compute downstream cascade and stage movement; do not reconstruct them in prose or state edits.
+- Run `researchctl doctor` before approval. Use `checkpoint` for bounded recovery summaries, and keep `.research/memory.md` limited to durable facts, decisions, failures, open questions, and the next action.
+- Do not cross costly, destructive, safety-relevant, hardware, publication, submission, or other external-action boundaries without the authority required by the user and policy.
 
-Use another stage only when the request requires a direct handoff or evidence has invalidated an upstream assumption. Check `allowed_transitions` and required Gates before changing `current_stage`. Never infer Gate approval from silence or task completion.
+## Hand off
 
-## Preserve the scientific contract
-
-- Label evidence, interpretation, assumptions, exploratory findings, and unknowns; never fabricate sources, results, metadata, code behavior, checks, or decisions.
-- Give stable IDs to material research objects. Version and hash mutable specifications, and bind runs to the method, experiment specification, code, configuration, data/environment, randomization, and outputs used.
-- Preserve failed, excluded, null, negative, and contradictory evidence with reasons. Trace promoted claims backward to evidence and forward to manuscript and review artifacts.
-- Treat `.research/memory.md` only as bounded navigation context, never as evidence or approval authority.
-- Before creating a workflow-owned artifact, follow `artifact_layout` from policy as the sole output-location contract; do not invent parallel artifact roots.
-- Follow `review_language` from policy for internal review material, persistent narrative state, and formal-output exceptions.
-
-## Update state safely
-
-- Register every material canonical artifact before a downstream handoff with `researchctl artifact register <role> --stage <stage-id> --path <file> --artifact-id <id> --version <version> [--status <status>]`. For a policy name such as `idea.idea_card`, pass `idea` to `--stage` and `idea_card` as `<role>`. Status is descriptive, defaults to `current`, and never means Gate approval. The command hashes but does not copy the file, so preserve approved versions at stable paths; never register `.research/state.json`, `.research/state.lock`, or `.research/memory.md` as evidence.
-- Register material files directly, or retain large run/output collections through a registered registry or manifest containing stable IDs, paths, and checksums. `researchctl` verifies the registry or manifest file itself; the current stage must still verify the files it references.
-- Use `researchctl gate approve|reopen` for every Gate decision. Never edit Gate fields directly.
-- Run `researchctl doctor` to verify registered pointers and hashes before Gate approval. Gate approval separately refuses missing policy-required roles. A missing or changed historical approval file remains an audit warning; reopen the affected Gate and register the replacement at a new versioned path before reapproval.
-- Use `researchctl checkpoint` for a bounded recovery summary after material work. Add `--stage <stage-id>` only for a transition permitted by `allowed_transitions`; never edit `current_stage` directly.
-- Update `.research/memory.md` with only durable facts, decisions, failures, open questions, and the next checkpoint; point entries to canonical artifact IDs or paths.
-- Do not cross an expensive, destructive, safety-relevant, or external-action boundary without the authority required by the user and policy.
-
-## Finish with a bounded handoff
-
-Report the active stage, Gate state, verified artifacts or checks, unsupported or reopened items, and the next smallest action. Do not claim a stage is complete unless its policy exit criteria are satisfied.
+Report the active stage and Gate state, current registered revisions or checks, unsupported or reopened items, and the next smallest action. A stage is complete only when the current policy criteria are satisfied.

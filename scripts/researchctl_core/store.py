@@ -13,16 +13,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .constants import (
+    CLEAN_BREAK_REINIT_GUIDANCE,
     DEFAULT_MEMORY_TEMPLATE,
-    GATE_IDS,
-    LEGACY_RELATIVE_PATH,
     LOCK_RELATIVE_PATH,
     LOCK_TIMEOUT_SECONDS,
     Policy,
-    REQUIRED_STATE_FIELDS,
     ResearchCtlError,
     STATE_RELATIVE_PATH,
-    TimestampExhaustionError,
+)
+from .gate_records import approval_targets_for_gate
+from .jsonutil import (
+    DuplicateJsonKeyError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
 )
 from .timeutils import next_state_timestamp, utc_now
 
@@ -54,8 +57,6 @@ def find_project_root(start: Path | None = None) -> Path:
 
     for candidate in (current, *current.parents):
         if (candidate / STATE_RELATIVE_PATH).is_file():
-            return candidate
-        if (candidate / LEGACY_RELATIVE_PATH).is_file():
             return candidate
     return current
 
@@ -161,13 +162,15 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 def load_state(root: Path) -> dict[str, Any]:
     path = root / STATE_RELATIVE_PATH
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = strict_json_loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ResearchCtlError(
             f"research project is not initialized at {root}; run `researchctl init`"
         ) from exc
     except (OSError, UnicodeError) as exc:
         raise ResearchCtlError(f"cannot read {path}: {exc}") from exc
+    except (DuplicateJsonKeyError, NonStandardJsonConstantError) as exc:
+        raise ResearchCtlError(f"state contains {exc}: {path}") from exc
     except (json.JSONDecodeError, RecursionError) as exc:
         if isinstance(exc, RecursionError):
             raise ResearchCtlError(f"state JSON is nested too deeply: {path}") from exc
@@ -179,14 +182,16 @@ def load_state(root: Path) -> dict[str, Any]:
     return value
 
 def require_compatible_state(state: dict[str, Any], policy: Policy) -> None:
-    missing = REQUIRED_STATE_FIELDS - set(state)
+    if state.get("schema_version") != policy.schema_version:
+        raise ResearchCtlError(
+            "unsupported state schema_version "
+            f"{state.get('schema_version')!r}; v2 requires {policy.schema_version!r}; "
+            f"{CLEAN_BREAK_REINIT_GUIDANCE}"
+        )
+    missing = set(policy.runtime.state_required_fields) - set(state)
     if missing:
         raise ResearchCtlError(
             "state is missing required fields: " + ", ".join(sorted(missing))
-        )
-    if state.get("schema_version") != policy.schema_version:
-        raise ResearchCtlError(
-            "state schema_version does not match policy; run `researchctl doctor`"
         )
     if state.get("workflow_version") != policy.workflow_version:
         raise ResearchCtlError(
@@ -215,25 +220,81 @@ def default_memory(project_name: str) -> str:
         "## 下一检查点\n"
     )
 
-def new_gate_state() -> dict[str, Any]:
-    return {"status": "pending", "latest_decision_id": None, "history": []}
+def new_gate_record(policy: Policy) -> dict[str, Any]:
+    record = {"status": "pending", "latest_decision_id": None, "history": []}
+    if set(record) != set(policy.runtime.gate_record_fields):
+        raise ResearchCtlError("runtime contract does not match the Gate writer")
+    return record
+
+
+def new_gate_state(policy: Policy, gate: str) -> dict[str, Any]:
+    targets = approval_targets_for_gate(policy, gate)
+    if targets:
+        container_field = policy.runtime.gate_target_container_fields[0]
+        return {
+            container_field: {
+                target: new_gate_record(policy) for target in targets
+            }
+        }
+    return new_gate_record(policy)
+
 
 def new_state(root: Path, policy: Policy) -> dict[str, Any]:
     timestamp = utc_now()
-    return {
+    state = {
         "schema_version": policy.schema_version,
         "workflow_version": policy.workflow_version,
         "enabled": True,
         "project_id": f"PROJECT-{uuid.uuid4().hex[:12].upper()}",
         "project_name": root.name,
         "current_stage": policy.stage_order[0],
-        "gates": {gate: new_gate_state() for gate in GATE_IDS},
+        "lifecycle": {
+            "status": "active",
+            "latest_decision_id": None,
+            "history": [],
+        },
+        "activation_history": [],
+        "gates": {gate: new_gate_state(policy, gate) for gate in policy.gate_order},
         "artifacts": {},
         "last_checkpoint": None,
         "stage_history": [],
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    if set(state) != set(policy.runtime.state_required_fields):
+        raise ResearchCtlError("runtime contract does not match the state writer")
+    return state
+
+
+def validate_runtime_writer_contract(policy: Policy) -> None:
+    """Fail policy loading before an incompatible v2 writer schema can be used."""
+
+    # ``new_state`` is the authority for the emitted shape, including nested Gate
+    # records.  Probe its nested containers too so ``init`` cannot succeed with a
+    # state that the same runtime's ``doctor`` immediately rejects.
+    state = new_state(Path("runtime-contract-validation"), policy)
+    lifecycle = state.get("lifecycle")
+    if not isinstance(lifecycle, dict) or set(lifecycle) != set(
+        policy.runtime.lifecycle_record_fields
+    ):
+        raise ResearchCtlError(
+            "runtime contract does not match the lifecycle record writer"
+        )
+    gates = state.get("gates")
+    if not isinstance(gates, dict):
+        raise ResearchCtlError("runtime contract does not match the Gate writer")
+    expected_container_fields = set(policy.runtime.gate_target_container_fields)
+    for gate in policy.gate_order:
+        if not approval_targets_for_gate(policy, gate):
+            continue
+        container = gates.get(gate)
+        if (
+            not isinstance(container, dict)
+            or set(container) != expected_container_fields
+        ):
+            raise ResearchCtlError(
+                "runtime contract does not match the targeted Gate writer"
+            )
 
 def record_stage_transition(
     state: dict[str, Any],
@@ -278,17 +339,7 @@ def ensure_local_git_exclude(root: Path) -> bool:
         handle.write(f"{separator}.research/\n")
     return True
 
-def write_mutated_state(
-    root: Path,
-    state: dict[str, Any],
-    *,
-    allow_timestamp_exhaustion: bool = False,
-) -> None:
-    try:
-        state["updated_at"] = next_state_timestamp(state)
-    except TimestampExhaustionError:
-        if not allow_timestamp_exhaustion:
-            raise
-        # Disabling is an emergency fail-safe. At datetime.max there is no
-        # representable successor, so preserve the existing valid timestamp.
+
+def write_mutated_state(root: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = next_state_timestamp(state)
     atomic_write_json(root / STATE_RELATIVE_PATH, state)

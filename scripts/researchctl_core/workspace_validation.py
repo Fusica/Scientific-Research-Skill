@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .constants import LEGACY_RELATIVE_PATH, MEMORY_RELATIVE_PATH, Policy
+from .artifacts import resolved_workspace_roots
+from .constants import (
+    LEGACY_RELATIVE_PATH,
+    MEMORY_RELATIVE_PATH,
+    Policy,
+    ResearchCtlError,
+)
 from .store import git_exclude_path, run_git
 
 
@@ -16,8 +22,15 @@ def validate_workspace(
 ) -> None:
     if not (root / MEMORY_RELATIVE_PATH).is_file():
         errors.append(f"missing project memory: {MEMORY_RELATIVE_PATH}")
-    if not (root / policy.artifact_root).is_dir():
-        errors.append(f"missing artifact workspace: {policy.artifact_root}")
+    try:
+        artifact_root, snapshot_root = resolved_workspace_roots(root, policy)
+    except ResearchCtlError as exc:
+        errors.append(str(exc))
+    else:
+        if not artifact_root.is_dir():
+            errors.append(f"missing artifact workspace: {policy.artifact_root}")
+        if not snapshot_root.is_dir():
+            errors.append(f"missing snapshot workspace: {policy.snapshot_root}")
     exclude_path = git_exclude_path(root)
     if exclude_path is None:
         warnings.append(
@@ -44,5 +57,6 @@ def validate_workspace(
             )
     if (root / LEGACY_RELATIVE_PATH).exists():
         warnings.append(
-            f"legacy state retained at {LEGACY_RELATIVE_PATH}; state.json is authoritative"
+            f"unsupported legacy state retained at {LEGACY_RELATIVE_PATH}; "
+            "v2 will not read or migrate it"
         )

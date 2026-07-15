@@ -1,36 +1,8 @@
 {
-  "schema_version": "1.0",
-  "workflow_version": "1.1.0",
-  "stage_order": [
-    "idea",
-    "literature",
-    "method",
-    "experiment_results",
-    "paper",
-    "revision"
-  ],
-  "gate_order": [
-    "idea_freeze",
-    "method_experiment_approval",
-    "claim_freeze",
-    "release"
-  ],
-  "state_contract": {
-    "required_fields": [
-      "schema_version",
-      "workflow_version",
-      "enabled",
-      "project_id",
-      "project_name",
-      "current_stage",
-      "gates",
-      "artifacts",
-      "last_checkpoint",
-      "stage_history",
-      "created_at",
-      "updated_at"
-    ],
-    "stage_ids": [
+  "schema_version": "2.0",
+  "workflow_version": "2.0.0",
+  "workflow_graph": {
+    "stage_order": [
       "idea",
       "literature",
       "method",
@@ -38,41 +10,93 @@
       "paper",
       "revision"
     ],
-    "gate_ids": [
-      "idea_freeze",
-      "method_experiment_approval",
-      "claim_freeze",
-      "release"
-    ],
-    "gate_statuses": ["pending", "approved", "reopened"],
-    "gate_actions": ["approve", "reopen"],
-    "artifact_pointer_fields": ["path", "artifact_id", "version", "content_hash", "status"]
+    "stage_transitions": {
+      "idea": [
+        {"to": "literature", "trigger": {"type": "checkpoint"}},
+        {"to": "method", "trigger": {"type": "stage_exit", "stage": "idea"}}
+      ],
+      "literature": [
+        {"to": "idea", "trigger": {"type": "checkpoint"}},
+        {"to": "method", "trigger": {"type": "stage_exit", "stage": "idea"}}
+      ],
+      "method": [
+        {"to": "idea", "trigger": {"type": "checkpoint"}},
+        {"to": "literature", "trigger": {"type": "checkpoint"}},
+        {"to": "experiment_results", "trigger": {"type": "stage_exit", "stage": "method"}}
+      ],
+      "experiment_results": [
+        {"to": "idea", "trigger": {"type": "checkpoint"}},
+        {"to": "literature", "trigger": {"type": "checkpoint"}},
+        {"to": "method", "trigger": {"type": "checkpoint"}},
+        {"to": "paper", "trigger": {"type": "stage_exit", "stage": "experiment_results"}}
+      ],
+      "paper": [
+        {"to": "literature", "trigger": {"type": "checkpoint"}},
+        {"to": "method", "trigger": {"type": "checkpoint"}},
+        {"to": "experiment_results", "trigger": {"type": "checkpoint"}},
+        {"to": "revision", "trigger": {"type": "stage_exit", "stage": "paper"}}
+      ],
+      "revision": [
+        {"to": "idea", "trigger": {"type": "checkpoint"}},
+        {"to": "literature", "trigger": {"type": "checkpoint"}},
+        {"to": "method", "trigger": {"type": "checkpoint"}},
+        {"to": "experiment_results", "trigger": {"type": "checkpoint"}},
+        {"to": "paper", "trigger": {"type": "checkpoint"}}
+      ]
+    },
+    "stage_exit_requirements": {
+      "idea": {"gate": "idea_freeze"},
+      "literature": null,
+      "method": {"gate": "method_experiment_approval"},
+      "experiment_results": {"gate": "claim_freeze"},
+      "paper": {"gate": "release", "target": "initial_submission"},
+      "revision": {"gate": "release", "target": "revision_rebuttal"}
+    }
   },
+  "artifact_role_cardinality_default": "one",
   "artifact_layout": {
     "generated_root": ".research/artifacts",
     "stage_path_template": ".research/artifacts/<stage-id>",
-    "instruction": "Write new workflow artifacts under .research/artifacts/<stage-id>/; never create project-root research/, contracts/, or artifacts/. Register existing user files in place."
+    "snapshot_root": ".research/snapshots",
+    "snapshot_stage_path_template": ".research/snapshots/<stage-id>",
+    "instruction": "Keep one stable artifact ID for each canonical role under .research/artifacts/<stage-id>/ or register an existing project file in place, and prefer one working path. The first artifact register call creates revision 1; changed content or intentional source relocation appends the next immutable full-file provenance revision under .research/snapshots/<stage-id>/, while an identical source-path and content-hash registration is idempotent. A path move does not create a new artifact identity, and hand-created v2, v3, or parallel snapshot files are prohibited. Register a small manifest with stable IDs, paths, and checksums for directories, files above the runtime snapshot limit, and large run or output collections. Never create project-root research/, contracts/, or artifacts/."
   },
   "review_language": {
     "internal_review_default": "zh-CN",
     "formal_output_default": "en",
     "instruction": ".research 中需要人工审核或维护的中间产物、memory、checkpoint summary 和 Gate reason 采用中文骨干；论文、返修回复、代码及注释保持英文；JSON/YAML 字段、ID、枚举、路径、命令、公式、原始引文、书目信息与原始日志保持英文或原文。"
   },
+  "workspace_lifecycle": {
+    "scope": "One workspace owns one paper-bound research mainline from Idea through publication or evidence-supported termination.",
+    "mainline_identity": "The research question and expected core contribution define the mainline; methods, experiments, and wording may iterate, but changing either identity boundary requires a new workspace.",
+    "decision_review": "Every explicit root Gate or lifecycle decision records supporting and opposing evidence, unresolved risks, a rationale, stop or reopen conditions, and bound artifact revisions; the runtime checks shape and references, not scientific truth.",
+    "termination": "Termination is a protected global action available from any stage, preserves current_stage and Gate history, and is a legitimate evidence-supported completion of scientific judgment.",
+    "completion": "Release is repeatable and does not complete the workspace; completion requires explicit researcher confirmation that the paper cycle ended after at least an initial release.",
+    "terminal_access": "A terminated or completed workspace permits reading, audit, status --json or Dashboard export, disable, and explicit reopen; it permits no research mutation.",
+    "reopen": "A terminal workspace may be explicitly reopened only for the same mainline; reopen the earliest affected approved GateRef when prior commitments are affected and preserve all terminal history.",
+    "inactivity": "No paused state exists; an active workspace may remain idle, with checkpoint carrying the waiting reason and resumption condition.",
+    "activation": "enabled is an orthogonal supervision switch; disable requires an audit reason and changes no lifecycle, stage, or Gate state.",
+    "cross_workspace_reuse": "A new workspace may copy and register old data by value with source workspace, original artifact identity, revision, Hash, and import reason, but inherits no Gate, selection, claim, exclusion, lifecycle, or completion judgment."
+  },
+  "authority_boundary": [
+    "Inside approved boundaries, AI may retrieve, analyze, draft, update and register artifacts, and run low-risk checks.",
+    "Gate decisions, lifecycle decisions, costly experiments, external release, destructive operations, and safety-relevant execution remain human decisions."
+  ],
   "gates": {
     "idea_freeze": {
       "label": "Idea freeze",
-      "requires_gates": [],
-      "required_for": ["method"],
-      "advance_to": "method",
-      "reopen_to": "idea",
       "required_artifact_roles": ["idea.idea_card", "literature.evidence_base"],
+      "selection_artifact_role": "idea.idea_card",
       "approval_requires": [
-        "one falsifiable idea with a stable ID and version",
+        "one registered idea portfolio whose current revision marks exactly one falsifiable candidate as selected and preserves all other candidates with stable IDs and dispositions",
+        "candidate dispositions use only active, shortlisted, selected, rejected, or falsified and include parent lineage, supporting and opposing evidence, kill criteria, and selection or rejection reasons",
         "closest-work evidence and smallest defensible difference",
         "feasibility, risks, predictions, and kill criteria",
-        "explicit human approval with artifact references"
+        "human review confirms the selected ID matches the selected candidate inside the portfolio because runtime does not parse scientific Markdown",
+        "explicit human approval with --selected-id naming the scientific candidate ID selected inside the idea portfolio"
       ],
       "reopen_when_changed": [
+        "selected idea candidate changes",
         "central mechanism or contribution changes",
         "closer prior work removes the stated difference",
         "feasibility or falsifiability changes materially"
@@ -80,19 +104,19 @@
     },
     "method_experiment_approval": {
       "label": "Method and experiment approval",
-      "requires_gates": ["idea_freeze"],
-      "required_stage": "method",
-      "required_for": ["experiment_results"],
-      "advance_to": "experiment_results",
-      "reopen_to": "method",
       "required_artifact_roles": ["method.approval_package"],
+      "selection_artifact_role": "method.approval_package",
       "approval_requires": [
-        "versioned method contract with assumptions and interfaces",
+        "one registered method portfolio whose current revision marks exactly one method candidate as selected and preserves alternatives with stable IDs and dispositions",
+        "candidate dispositions use only active, shortlisted, selected, rejected, or falsified and include parent lineage, supporting and opposing evidence, kill criteria, and selection or rejection reasons",
+        "selected method contract with assumptions, interfaces, equations, and implementation mappings",
         "prediction-to-experiment mapping",
         "baselines, metrics, statistical unit, resources, and safety constraints",
-        "explicit human approval with artifact references"
+        "human review confirms the selected ID matches the selected method inside the approval package because runtime does not parse scientific Markdown",
+        "explicit human approval with --selected-id naming the scientific method candidate ID selected inside the approval package"
       ],
       "reopen_when_changed": [
+        "selected method candidate changes",
         "central objective, assumption, module, or evaluation contract changes",
         "experiment design no longer tests the approved predictions",
         "resource or safety constraints invalidate the approved plan"
@@ -100,26 +124,52 @@
     },
     "claim_freeze": {
       "label": "Claim freeze",
-      "requires_gates": ["method_experiment_approval"],
-      "required_stage": "experiment_results",
-      "required_for": ["paper"],
-      "advance_to": "paper",
-      "reopen_to": "experiment_results",
-      "required_artifact_roles": [
-        "experiment_results.experiment_matrix",
-        "experiment_results.run_registry",
-        "experiment_results.decision_log",
-        "experiment_results.analysis_registry",
-        "experiment_results.artifact_manifest",
-        "experiment_results.claim_ledger"
-      ],
-      "approval_requires": [
-        "audited run population and analysis provenance",
-        "local run registry resolves any external tracker references and exports to stable hashes",
-        "claim ledger with calibrated wording and limitations",
-        "negative, null, excluded, and contradictory outcomes retained",
-        "explicit human approval with artifact references"
-      ],
+      "default_approval_mode": "normal",
+      "approval_modes": {
+        "normal": {
+          "required_artifact_roles": [
+            "experiment_results.experiment_matrix",
+            "experiment_results.run_registry",
+            "experiment_results.decision_log",
+            "experiment_results.analysis_registry",
+            "experiment_results.artifact_manifest",
+            "experiment_results.claim_ledger"
+          ],
+          "approval_requires": [
+            "audited run population and analysis provenance",
+            "local run registry resolves any external tracker references and exports to stable hashes",
+            "claim ledger with calibrated wording and limitations",
+            "negative, null, excluded, and contradictory outcomes retained",
+            "explicit human approval with the current registered artifact revisions"
+          ]
+        },
+        "retrospective_revision_import": {
+          "cli_flag": "--retrospective-revision-import",
+          "eligibility": "explicitly authorized rescue of the same completed manuscript already under revision before workflow activation, with historical provenance that cannot be recovered; never ordinary cross-workspace data reuse",
+          "claim_scope": "existing_manuscript_claims_only",
+          "required_artifact_roles": [
+            "paper.manuscript",
+            "experiment_results.claim_ledger",
+            "experiment_results.provenance_gap_record"
+          ],
+          "mutable_after_approval_roles": [
+            "paper.manuscript"
+          ],
+          "waivable_historical_roles": [
+            "experiment_results.experiment_matrix",
+            "experiment_results.run_registry",
+            "experiment_results.decision_log",
+            "experiment_results.analysis_registry",
+            "experiment_results.artifact_manifest"
+          ],
+          "approval_requires": [
+            "explicit human authorization for a manuscript already under revision before workflow activation",
+            "the current manuscript, claim ledger, and provenance-gap record are registered and hash-verified",
+            "every present historical artifact verifies and every unavailable historical role is recorded as waived",
+            "claims remain within the existing manuscript boundary and all new work follows the normal evidence path"
+          ]
+        }
+      },
       "reopen_when_changed": [
         "included runs, statistical unit, estimand, or analysis changes materially",
         "new evidence weakens or contradicts a frozen claim",
@@ -128,34 +178,35 @@
     },
     "release": {
       "label": "External release",
-      "requires_gates": ["claim_freeze"],
-      "required_for": ["revision", "external_submission", "reviewer_response"],
-      "advance_to": "revision",
-      "release_targets": ["initial_submission", "revision_rebuttal"],
-      "required_artifact_roles_by_target": {
-        "initial_submission": [
-          "paper.manuscript",
-          "paper.claim_map",
-          "paper.change_map",
-          "paper.bibliography_provenance",
-          "paper.compilation_log",
-          "paper.rendered_output",
-          "paper.render_inspection_record",
-          "paper.submission_checklist"
-        ],
-        "revision_rebuttal": [
-          "revision.revised_manuscript",
-          "revision.review_map",
-          "revision.change_log",
-          "revision.response_document",
-          "revision.manuscript_diff",
-          "revision.verification_records",
-          "revision.rendered_output",
-          "revision.release_checklist"
-        ]
+      "approval_targets": {
+        "initial_submission": {
+          "mutable_after_approval_roles": ["paper.manuscript"],
+          "required_artifact_roles": [
+            "paper.manuscript",
+            "paper.claim_map",
+            "paper.change_map",
+            "paper.bibliography_provenance",
+            "paper.compilation_log",
+            "paper.rendered_output",
+            "paper.render_inspection_record",
+            "paper.submission_checklist"
+          ]
+        },
+        "revision_rebuttal": {
+          "required_artifact_roles": [
+            "revision.revised_manuscript",
+            "revision.review_map",
+            "revision.change_log",
+            "revision.response_document",
+            "revision.manuscript_diff",
+            "revision.verification_records",
+            "revision.rendered_output",
+            "revision.release_checklist"
+          ]
+        }
       },
       "approval_requires": [
-        "release artifact paths and content hashes",
+        "release artifact revision snapshots and content hashes",
         "declared source, build, and bibliography toolchain completed with retained logs",
         "all promised checks completed and rendered output visually inspected",
         "claim, citation, anonymization, and cross-document consistency verified",
@@ -168,100 +219,60 @@
       ]
     }
   },
-  "allowed_transitions": {
-    "idea": [
-      {"to": "literature", "required_gates": []},
-      {"to": "method", "required_gates": ["idea_freeze"]}
-    ],
-    "literature": [
-      {"to": "idea", "required_gates": []},
-      {"to": "method", "required_gates": ["idea_freeze"]}
-    ],
-    "method": [
-      {"to": "idea", "required_gates": []},
-      {"to": "literature", "required_gates": []},
-      {"to": "experiment_results", "required_gates": ["method_experiment_approval"]}
-    ],
-    "experiment_results": [
-      {"to": "idea", "required_gates": []},
-      {"to": "literature", "required_gates": []},
-      {"to": "method", "required_gates": []},
-      {"to": "paper", "required_gates": ["claim_freeze"]}
-    ],
-    "paper": [
-      {"to": "literature", "required_gates": []},
-      {"to": "method", "required_gates": []},
-      {"to": "experiment_results", "required_gates": []},
-      {"to": "revision", "required_gates": ["release"]}
-    ],
-    "revision": [
-      {"to": "idea", "required_gates": []},
-      {"to": "literature", "required_gates": []},
-      {"to": "method", "required_gates": []},
-      {"to": "experiment_results", "required_gates": []},
-      {"to": "paper", "required_gates": []}
-    ]
-  },
   "stages": {
     "idea": {
       "label": "Idea generation and freeze",
       "reference": "01-idea.md",
       "required_inputs": ["research brief", "resource and domain constraints", "known prior work"],
       "allowed_actions": ["generate candidates", "stress-test mechanisms", "request literature evidence", "compare feasibility", "define predictions and kill criteria"],
-      "required_evidence": ["candidate comparison", "closest-work evidence", "falsifying outcomes", "feasibility and risk record"],
-      "exit_criteria": ["one versioned candidate is approval-ready", "novelty language is confidence-bounded", "predictions and kill criteria are explicit", "human approves idea_freeze"],
-      "prohibited_actions": ["treat intuition, titles, abstracts, popularity, or scores as novelty evidence", "hide rejected candidates or idea-specific contradictory evidence"],
-      "gate_to_exit": "idea_freeze"
+      "required_evidence": ["one portfolio containing all candidates, their lineage and dispositions", "candidate comparison", "closest-work evidence", "supporting and opposing evidence", "falsifying outcomes", "feasibility and risk record", "selection and rejection reasons"],
+      "exit_criteria": ["exactly one candidate in the registered idea portfolio is marked selected", "novelty language is confidence-bounded", "predictions and kill criteria are explicit", "the current idea.idea_card and literature.evidence_base revisions are registered", "human approves idea_freeze with the selected scientific candidate ID"],
+      "prohibited_actions": ["treat intuition, titles, abstracts, popularity, or scores as novelty evidence", "hide or delete rejected or falsified candidates or idea-specific contradictory evidence"]
     },
     "literature": {
       "label": "Literature evidence and idea refinement",
       "reference": "02-literature.md",
       "required_inputs": ["research questions or candidate idea", "search scope and constraints"],
       "allowed_actions": ["register searches", "screen and read sources", "trace citations", "record supporting and conflicting evidence", "compare closest work", "revise idea boundaries"],
-      "required_evidence": ["provider-neutral search-run manifests with exact calls and retained raw-snapshot hashes or non-retention reasons", "source and screening registry", "passage-level evidence records", "closest-work comparison", "search limitations, coverage gaps, and stopping reason"],
+      "required_evidence": ["provider-neutral search-run manifests with exact calls and retained raw-snapshot hashes or non-retention reasons", "append-only source and screening records with stable record IDs and supersedes links for corrections", "append-only passage-level evidence records", "closest-work comparison", "search limitations, coverage gaps, and stopping reason"],
       "exit_criteria": ["material claims have evidence IDs or are marked as author hypotheses", "retrieval and deduplication decisions are reproducible without depending on one provider", "closest work is read at sufficient depth", "conflicts and unknowns are explicit", "idea implications are recorded"],
-      "prohibited_actions": ["treat metadata or abstract-only reading as detailed comparison evidence", "use citation counts or repository popularity as contribution evidence"],
-      "gate_to_exit": null
+      "prohibited_actions": ["treat metadata or abstract-only reading as detailed comparison evidence", "use citation counts or repository popularity as contribution evidence"]
     },
     "method": {
       "label": "Method formalization",
       "reference": "03-method.md",
       "required_inputs": ["approved idea", "closest-work evidence", "project constraints and existing implementation"],
-      "allowed_actions": ["define problem and assumptions", "derive objectives", "specify atomic modules and interfaces", "write aligned pseudocode", "map equations to code", "map predictions to experiments"],
-      "required_evidence": ["versioned method contract", "notation and shape audit", "equation-to-code map", "prediction-to-experiment map", "unresolved-risk list"],
-      "exit_criteria": ["central mechanism is unambiguous and implementable", "assumptions, exclusions, shapes, units, and failure behavior are explicit", "tests and falsifying predictions are defined", "human approves method_experiment_approval"],
-      "prohibited_actions": ["silently change the frozen contribution", "present heuristics as guarantees", "approve experiments without testable predictions"],
-      "gate_to_exit": "method_experiment_approval"
+      "allowed_actions": ["generate and compare method candidates", "define problem and assumptions", "derive objectives", "specify atomic modules and interfaces", "write aligned pseudocode", "map equations to code", "map predictions to experiments"],
+      "required_evidence": ["one approval package containing all method candidates, their lineage and dispositions", "supporting and opposing evidence", "selection and rejection reasons", "selected method contract", "notation and shape audit", "equation-to-code map", "prediction-to-experiment map", "unresolved-risk list"],
+      "exit_criteria": ["exactly one method candidate in the registered approval package is marked selected", "the selected central mechanism is unambiguous and implementable", "assumptions, exclusions, shapes, units, and failure behavior are explicit", "tests and falsifying predictions are defined", "the experiment contract names the selected method ID and every experiment row carries method and prediction IDs", "human approves method_experiment_approval with the selected scientific method candidate ID"],
+      "prohibited_actions": ["silently change the frozen contribution", "hide or delete rejected or falsified method candidates", "present heuristics as guarantees", "approve experiments without testable predictions"]
     },
     "experiment_results": {
       "label": "Experiment and result lifecycle",
       "reference": "04-experiment-results.md",
       "required_inputs": ["approved method and experiment contract", "registered predictions", "data, environment, resource, and safety profile"],
       "allowed_actions": ["run integrity checks and baselines", "execute registered experiments", "diagnose failures", "perform registered analyses", "generate traceable figures and tables", "promote or reject claims"],
-      "required_evidence": ["experiment matrix", "complete local run registry with any tracker export references", "decision log", "analysis registry", "artifact manifest", "claim ledger"],
-      "exit_criteria": ["run provenance and inclusion decisions are auditable independent of external tracker availability", "analysis matches the statistical unit and data-generating process", "claim wording is bounded by evidence", "human approves claim_freeze"],
-      "prohibited_actions": ["tune on the final test set", "change metrics or exclusions after seeing results without labeling exploratory analysis", "infer causality from an uncontrolled comparison"],
-      "gate_to_exit": "claim_freeze"
+      "required_evidence": ["experiment matrix", "append-only local run registry with stable run IDs, correction lineage, and any tracker export references", "append-only decision log", "analysis registry", "artifact manifest", "claim ledger", "retained failed, null, negative, excluded, and contradictory outcomes"],
+      "exit_criteria": ["run provenance and inclusion decisions are auditable independent of external tracker availability", "analysis matches the statistical unit and data-generating process", "claim wording is bounded by evidence", "all artifact roles required by the selected claim_freeze approval mode are registered or explicitly waivable under that mode", "human approves claim_freeze with the explicit approval mode recorded"],
+      "prohibited_actions": ["tune on the final test set", "change metrics or exclusions after seeing results without labeling exploratory analysis", "infer causality from an uncontrolled comparison"]
     },
     "paper": {
       "label": "Paper production and submission preparation",
       "reference": "05-paper.md",
       "required_inputs": ["frozen claim ledger", "method and experiment artifacts", "literature evidence", "venue and anonymization requirements"],
-      "allowed_actions": ["map claims to sections", "draft and revise", "integrate citations and artifacts", "compile and render", "audit consistency and submission constraints"],
+      "allowed_actions": ["maintain stable working manuscript and paper records", "map claims to sections", "draft and revise", "integrate citations and artifacts", "compile and render", "audit consistency and submission constraints", "register immutable full-file revisions for release"],
       "required_evidence": ["paper claim map", "paper change map", "bibliography provenance", "declared source and build toolchain", "clean compilation log and rendered visual inspection", "submission checklist"],
-      "exit_criteria": ["every central claim and number traces backward", "wording stays within the claim ledger", "the declared bibliography and build pipeline is reproducible", "citations, cross-references, anonymity, render inspection, and venue constraints pass", "human approves the named release target"],
-      "prohibited_actions": ["draft around a material evidence gap", "strengthen wording beyond the frozen claim ledger"],
-      "gate_to_exit": "release"
+      "exit_criteria": ["every central claim and number traces backward", "wording stays within the claim ledger", "the declared bibliography and build pipeline is reproducible", "citations, cross-references, anonymity, render inspection, and venue constraints pass", "all roles required by release/initial_submission are registered and verified", "human approves release/initial_submission"],
+      "prohibited_actions": ["draft around a material evidence gap", "strengthen wording beyond the frozen claim ledger"]
     },
     "revision": {
       "label": "Review and revision",
       "reference": "06-revision.md",
       "required_inputs": ["verbatim editor and reviewer feedback", "released manuscript", "current claim and evidence artifacts"],
-      "allowed_actions": ["decompose concerns", "triage required evidence", "run the lightest defensible verification", "revise source artifacts", "write point-by-point responses", "audit promises and consistency"],
+      "allowed_actions": ["maintain stable working revision records", "decompose concerns", "triage required evidence", "run the lightest defensible verification", "revise source artifacts", "write point-by-point responses", "audit promises and consistency", "register immutable full-file revisions for release"],
       "required_evidence": ["review map", "revision change log", "verified manuscript diffs and locations", "response document", "release checklist"],
-      "exit_criteria": ["each atomic concern has a direct answer and verified action", "manuscript and response agree", "numbers, citations, locations, and promised work are checked", "human approves revision_rebuttal release"],
-      "prohibited_actions": ["answer before applying a promised change", "misrepresent existing text as newly added", "overpromise experiments or future work", "weaken or omit reviewer wording"],
-      "gate_to_exit": "release"
+      "exit_criteria": ["each atomic concern has a direct answer and verified action", "manuscript and response agree", "numbers, citations, locations, and promised work are checked", "all roles required by release/revision_rebuttal are registered and verified", "human approves release/revision_rebuttal"],
+      "prohibited_actions": ["answer before applying a promised change", "misrepresent existing text as newly added", "overpromise experiments or future work", "weaken or omit reviewer wording"]
     }
   },
   "global_prohibited_actions": [
@@ -271,12 +282,14 @@
     "read or write Codex global memory as project research state",
     "fabricate citations, measurements, metadata, code behavior, checks, or completed actions",
     "erase failed, excluded, null, negative, or contradictory evidence",
+    "use retrospective_revision_import without explicit human authorization or describe waived historical evidence as verified",
     "perform destructive, expensive, safety-relevant, or external actions without sufficient authority"
   ],
   "semantic_audit": [
     "Claims, numbers, artifacts, and reported checks trace to verified evidence and provenance; hypotheses and unknowns remain labeled, and nothing is fabricated or reported complete without verification.",
     "Claim scope and certainty fit all retained evidence, including negative, null, failed, excluded, and contradictory outcomes with reasons.",
     "The current stage, required artifacts, transition, and Gate state match policy; every approval is explicit, human-authorized, and recorded through researchctl.",
+    "Any retrospective revision import is explicitly authorized, records its provenance gaps, preserves claim limits, and is never represented as verified historical experiment evidence or release approval.",
     "Unresolved risks are stated, and destructive, costly, safety-relevant, or external actions have the required authority before execution."
   ]
 }

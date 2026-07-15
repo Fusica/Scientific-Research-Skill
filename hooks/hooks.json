@@ -22,7 +22,7 @@
             "command": "node \"${PLUGIN_ROOT}/hooks/research-workflow-hook.js\" UserPromptSubmit",
             "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\research-workflow-hook.js\" UserPromptSubmit",
             "timeout": 5,
-            "statusMessage": "Routing the active-project prompt..."
+            "statusMessage": "Refreshing the active research state..."
           }
         ]
       }

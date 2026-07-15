@@ -2,14 +2,21 @@
 
 Treat experiments as registered prediction tests and analysis as calibrated claim assessment.
 
+## Use stable working artifacts and append-only records
+
+Maintain the canonical experiment-result roles under the shared `policy.artifact_layout` contract; keep this reference focused on their scientific content and update sequence.
+
+Keep the run registry and decision log append-only. Every line needs a unique `record_id`; a metadata correction or revised judgment appends a new record with `supersedes: <prior-record-id>` and a reason. Never delete or overwrite failed, null, negative, excluded, cancelled, preempted, pruned, or contradictory outcomes. Analyses and their corrections follow the same stable-ID and supersedes discipline in the analysis registry.
+
 ## Design the experiment contract
 
 For every experiment, record:
 
 ```yaml
+record_id: EXP-SPEC-RECORD-001
+supersedes: null
 experiment_id: EXP-001
-spec_version: 1
-spec_hash: null
+method_id: METHOD-001
 stage: baseline_reproduction
 origin_claim_candidate_ids: [CLAIM-CAND-001]
 prediction_ids: [PRED-001]
@@ -23,9 +30,9 @@ statistical_unit: ""
 metrics: {primary: [], secondary: []}
 repetitions: {design: "", rationale: ""}
 analysis_plan:
+  record_id: ANALYSIS-PLAN-RECORD-001
+  supersedes: null
   plan_id: ANALYSIS-PLAN-001
-  version: 1
-  content_hash: null
   primary_estimand: ""
   inclusion_criteria: []
   exclusion_criteria: []
@@ -37,7 +44,7 @@ stop_criteria: []
 kill_criteria: []
 ```
 
-Derive repetitions, uncertainty, effect thresholds, tests, and evaluation protocols from the data-generating process and resources. Version and hash the experiment matrix before execution; label later design or analysis changes as exploratory with reasons.
+Derive repetitions, uncertainty, effect thresholds, tests, and evaluation protocols from the data-generating process and resources. Register the experiment matrix before execution so the approved design has an immutable revision and hash. Later design or analysis changes update the same working file, append a decision record, register the next revision, and label the change exploratory with reasons when appropriate.
 
 ## Execute progressively
 
@@ -45,15 +52,40 @@ Progress from integrity and smoke checks to baseline parity, the minimal mechani
 
 ## Register every run
 
-Write one immutable run record per attempt, including:
+Append one immutable run record per attempt, including:
 
-- run identity, lineage, time, operator, execution status, and scientific outcome;
-- experiment and method IDs, versions, and hashes;
+- unique `record_id` and `run_id`, `supersedes: null`, lineage, time, operator, execution state, and scientific outcome;
+- experiment and method IDs plus the exact registered revisions and hashes used;
 - repository/commit/dirty patch, exact command, configuration, and randomization;
 - data/split/environment/simulator, hardware/runtime, and dependency/container identity;
 - output IDs, paths, checksums, logs, metrics, failure diagnosis, and inclusion/exclusion decision with reason.
 
-Distinguish technical failures from negative or falsifying outcomes and retain every attempt.
+Distinguish technical failures from negative or falsifying outcomes and retain every attempt. If a run record's metadata was wrong, append a correction with a new record ID, the same run ID, `supersedes` pointing to the prior record, and an explicit correction reason; never mutate the original line.
+
+### Classify retries by scientific identity
+
+Treat a restart, resume, or recovery as a retry only when the research question, method parameters, and expected estimand remain unchanged. Execution parameters such as GPU count, mixed precision, batch size, and worker count may differ when the researcher judges them operational rather than scientific for this experiment and declares every difference. Append a new run record for every attempt; never replace the original attempt or hide its outcome.
+
+Record at least:
+
+```yaml
+retry_of_run_id: RUN-001
+retry_reason: ""
+execution_differences:
+  gpu_count: {before: null, after: null}
+  mixed_precision: {before: null, after: null}
+  batch_size: {before: null, after: null}
+  workers: {before: null, after: null}
+  other: []
+all_execution_differences_declared: true
+scientific_identity_justification:
+  research_question_unchanged: true
+  method_parameters_unchanged: true
+  expected_estimand_unchanged: true
+  rationale: ""
+```
+
+If an execution change instead alters a scientific variable, effective method parameter, evaluated population, or expected estimand, register a new experiment rather than a retry. The runtime may preserve these fields and lineage, but it does not mechanically prove scientific identity or the completeness and truth of the declaration. Include all original and retry attempt run IDs when the underlying experiment is cumulatively reviewed.
 
 The local `experiment_results.run_registry` is the authoritative audit record. For computational experiments, prefer W&B when the project already supports it or the researcher selects it; use it for live metrics, groups, sweeps, artifacts, and collaboration, not as the only provenance store. Add optional tracker references to each run:
 
@@ -73,11 +105,49 @@ tracker_refs:
       exported_at: null
 ```
 
-After a run or sweep, export the resolved configuration, summary, required metric history, and artifact manifest to stable local files and record their hashes. Version and hash sweep search spaces, objectives, budgets, schedulers, and stop rules before launch; retain failed, cancelled, preempted, and pruned trials. Never persist tracker credentials in research artifacts. If W&B is unavailable, an existing tracker or `backend: local` is valid when the same local provenance contract is satisfied; physical experiments may instead link sample batches, instruments, raw media, and anomaly records.
+After a run or sweep, export the resolved configuration, summary, required metric history, and artifact manifest to stable local files and record their hashes. Register the sweep search space, objective, budget, scheduler, and stop rule before launch; update the same working specification and register its next revision when a material change is authorized. Retain failed, cancelled, preempted, and pruned trials. Never persist tracker credentials in research artifacts. If W&B is unavailable, an existing tracker or `backend: local` is valid when the same local provenance contract is satisfied; physical experiments may instead link sample batches, instruments, raw media, and anomaly records.
 
 ## Diagnose controlled changes
 
 Classify failures, reproduce the smallest failing case, and vary one causal factor where practical. Log the rationale, outcome, next action, impacted artifacts, and any reopened stage. Return upstream when an assumption or mechanism fails; stop when a kill criterion is met.
+
+## Run a cumulative experiment review
+
+After every non-retry experiment reaches a terminal outcome, run a cumulative review before planning or recommending the next experiment. Until that review exists, limit work to recording the outcome, diagnosing it, or recovering the same experiment; do not propose a new experiment or parameter change. A declared restart, resume, or infrastructure retry under the same scientific experiment identity does not add a separate review boundary, but the underlying experiment still requires one review when it produces a terminal scientific outcome or is abandoned.
+
+Read the current canonical revisions of the experiment matrix, run registry, decision log, analysis registry, artifact manifest, and claim ledger. Treat the current append-only registries as the complete index: include every relevant non-superseded successful, failed, null, negative, excluded, cancelled, preempted, pruned, and contradictory record rather than reasoning from only the latest run. Read historical snapshots or raw outputs only when resolving a correction, conflict, or audit question. Before offering the next experiment, verify that the latest relevant terminal run IDs appear in the newest cumulative review's `reviewed_run_ids`.
+
+Append one lightweight cumulative review record to the decision log; never rewrite an earlier review merely because the direction changed. Link the prior review for chronology, and use `supersedes` only when correcting an erroneous review record. A review should contain at least:
+
+```yaml
+record_id: EXP-REVIEW-RECORD-001
+supersedes: null
+review_id: EXP-REVIEW-001
+previous_review_id: null
+reviewed_run_ids: []
+reviewed_analysis_ids: []
+current_direction_judgment: ""
+supporting_evidence_ids: []
+opposing_evidence_ids: []
+eliminated_directions:
+  - direction_id: ""
+    reason: ""
+    evidence_ids: []
+unresolved_risks: []
+decision: continue # continue | adjust | return_upstream | stop
+next_experiment:
+  experiment_id: ""
+  question: ""
+  bounded_change: ""
+  rationale: ""
+  expected_observation: ""
+  falsifying_observation: ""
+stop_conditions: []
+```
+
+Base the direction judgment on the full reviewed set and identify which new evidence changed or preserved the prior judgment. Keep the next experiment as the smallest discriminating recommendation, not as an approval or a claim. If the review changes the selected method, a material experiment contract, or the permitted claim boundary, apply the earliest affected policy Gate's `reopen_when_changed` contract. Register the updated decision log, and update and register the claim ledger separately when claim status, scope, evidence, or allowed wording changes.
+
+This is a mandatory Skill-level planning boundary, not background automation: registering an artifact, generating the Dashboard, or running a Hook does not invoke the model or create the review record automatically.
 
 ## Audit before analysis
 
@@ -92,7 +162,7 @@ Every table cell and plotted value must resolve to:
 3. the statistical unit and estimand;
 4. a checksummed output artifact.
 
-State aggregation, uncertainty, and independent repetition count in captions. Register the canonical roles `experiment_matrix`, `run_registry`, `decision_log`, `analysis_registry`, `artifact_manifest`, and `claim_ledger` under `experiment_results`; map existing files instead of duplicating them.
+State aggregation, uncertainty, and independent repetition count in captions. Maintain one stable working artifact for each canonical role `experiment_matrix`, `run_registry`, `decision_log`, `analysis_registry`, `artifact_manifest`, and `claim_ledger` under `experiment_results`; register their current revisions instead of duplicating or hand-versioning the files. Use a registered manifest for directories, oversized artifacts, and large output collections.
 
 ## Promote claims conservatively
 
@@ -107,8 +177,9 @@ Start each claim as `unassessed`, then assign one status:
 Maintain entries such as:
 
 ```yaml
+record_id: CLAIM-RECORD-001
+supersedes: null
 claim_id: CLAIM-001
-claim_version: 1
 origin_claim_candidate_ids: [CLAIM-CAND-001]
 prediction_ids: [PRED-001]
 experiment_ids: []
@@ -133,8 +204,8 @@ forbidden_stronger_wording: ""
 manuscript_locations: []
 ```
 
-## Request claim freeze
+When claim wording, scope, evidence, or disposition changes, append or retain a superseding claim record with a new `record_id`; do not erase the prior claim assessment.
 
-Prepare `claim_freeze` only when the run population is auditable, all material outcomes are retained, analyses are registered or labeled exploratory, and affirmative claims have calibrated wording and limitations.
+## Hand off for claim freeze
 
-After explicit human approval, record `claim_freeze` through `researchctl`. Reopen it when run inclusion, estimand, statistical unit, analysis, material evidence, or permitted wording changes.
+Use `policy.stages.experiment_results.exit_criteria` and `policy.gates.claim_freeze`, including its current `approval_modes`, as the sole completion, required-role, waiver, and reopen contract. After explicit human approval, record the policy-selected mode through `researchctl` with the required decision review fields. Load `references/retrospective-revision-import.md` only when the user explicitly requests that policy mode and confirms both eligibility facts.

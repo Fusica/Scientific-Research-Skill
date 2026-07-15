@@ -24,7 +24,9 @@ Plugin component, a system-wide instruction file, or a source of runtime policy.
 
 Do not introduce project-overview files, a second state format, or Codex-global
 memory. Project memory belongs only in `.research/memory.md` and is local to the
-current worktree by default.
+current worktree by default. The generated `.research/dashboard.html` is an
+explicit exception: it is a disposable, read-only projection of canonical state,
+not an overview authority, state format, or memory store.
 
 ## Scientific boundaries
 

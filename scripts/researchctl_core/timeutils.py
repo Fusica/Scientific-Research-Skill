@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .constants import TimestampExhaustionError
+from .gate_records import iter_present_gate_records
 
 
 def utc_now() -> str:
@@ -18,7 +19,9 @@ def utc_now() -> str:
 def format_utc_timestamp(value: datetime) -> str:
     """Serialize an aware UTC datetime without losing sub-second ordering."""
 
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
 
 def parse_utc_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
@@ -52,17 +55,49 @@ def next_state_timestamp(state: dict[str, Any]) -> str:
             for transition in stage_history
             if isinstance(transition, dict)
         )
-    gates = state.get("gates")
-    if isinstance(gates, dict):
-        for record in gates.values():
-            history = record.get("history") if isinstance(record, dict) else None
-            if not isinstance(history, list):
+    for record in iter_present_gate_records(state):
+        history = record.get("history")
+        if not isinstance(history, list):
+            continue
+        recorded.extend(
+            parse_utc_timestamp(decision.get("decided_at"))
+            for decision in history
+            if isinstance(decision, dict)
+        )
+    lifecycle = state.get("lifecycle")
+    lifecycle_history = (
+        lifecycle.get("history") if isinstance(lifecycle, dict) else None
+    )
+    if isinstance(lifecycle_history, list):
+        recorded.extend(
+            parse_utc_timestamp(decision.get("decided_at"))
+            for decision in lifecycle_history
+            if isinstance(decision, dict)
+        )
+    activation_history = state.get("activation_history")
+    if isinstance(activation_history, list):
+        recorded.extend(
+            parse_utc_timestamp(event.get("decided_at"))
+            for event in activation_history
+            if isinstance(event, dict)
+        )
+    artifacts = state.get("artifacts")
+    if isinstance(artifacts, dict):
+        for stage_bucket in artifacts.values():
+            if not isinstance(stage_bucket, dict):
                 continue
-            recorded.extend(
-                parse_utc_timestamp(decision.get("decided_at"))
-                for decision in history
-                if isinstance(decision, dict)
-            )
+            for role_bucket in stage_bucket.values():
+                if not isinstance(role_bucket, dict):
+                    continue
+                for entry in role_bucket.values():
+                    revisions = entry.get("revisions") if isinstance(entry, dict) else None
+                    if not isinstance(revisions, list):
+                        continue
+                    recorded.extend(
+                        parse_utc_timestamp(revision.get("registered_at"))
+                        for revision in revisions
+                        if isinstance(revision, dict)
+                    )
     valid_recorded = [candidate for candidate in recorded if candidate is not None]
     if valid_recorded:
         try:

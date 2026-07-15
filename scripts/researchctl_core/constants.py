@@ -10,57 +10,82 @@ from typing import Any
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY_PATH = PLUGIN_ROOT / "skills/research/references/policy.yaml"
+DEFAULT_RUNTIME_CONTRACT_PATH = (
+    PLUGIN_ROOT / "skills/research/assets/runtime-contract.json"
+)
 DEFAULT_MEMORY_TEMPLATE = PLUGIN_ROOT / "skills/research/assets/memory.template.md"
 RESEARCH_DIR = ".research"
 STATE_RELATIVE_PATH = Path(RESEARCH_DIR) / "state.json"
 LOCK_RELATIVE_PATH = Path(RESEARCH_DIR) / "state.lock"
 MEMORY_RELATIVE_PATH = Path(RESEARCH_DIR) / "memory.md"
+DASHBOARD_RELATIVE_PATH = Path(RESEARCH_DIR) / "dashboard.html"
 LEGACY_RELATIVE_PATH = Path(RESEARCH_DIR) / "project-state.yaml"
 LOCK_TIMEOUT_SECONDS = 60.0
-
-GATE_IDS = (
-    "idea_freeze",
-    "method_experiment_approval",
-    "claim_freeze",
-    "release",
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+SUPPORTED_RUNTIME_CONTRACT_VERSION = "2.0"
+CLEAN_BREAK_REINIT_GUIDANCE = (
+    "preserve anything needed, delete .research, then run `researchctl init`; "
+    "no automatic migration"
 )
-GATE_STATUSES = {"pending", "approved", "reopened"}
-GATE_ACTIONS = {"approve", "reopen"}
-ARTIFACT_METADATA_FIELDS = ("artifact_id", "version", "content_hash", "status")
-ARTIFACT_POINTER_FIELDS = ("path", *ARTIFACT_METADATA_FIELDS)
-RESERVED_ARTIFACT_IDS = frozenset(ARTIFACT_POINTER_FIELDS)
+
 ARTIFACT_ROLE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-STATE_FIELD_ORDER = (
-    "schema_version",
-    "workflow_version",
-    "enabled",
-    "project_id",
-    "project_name",
-    "current_stage",
-    "gates",
-    "artifacts",
-    "last_checkpoint",
-    "stage_history",
-    "created_at",
-    "updated_at",
-)
-REQUIRED_STATE_FIELDS = set(STATE_FIELD_ORDER)
 
 
 class ResearchCtlError(RuntimeError):
     """An expected, user-actionable command failure."""
 
+
 class TimestampExhaustionError(ResearchCtlError):
     """The persisted chronology has no representable successor timestamp."""
 
+
+@dataclass(frozen=True)
+class RuntimeContract:
+    contract_version: str
+    state_schema_version: str
+    state_required_fields: tuple[str, ...]
+    decision_required_fields: tuple[str, ...]
+    lifecycle_statuses: tuple[str, ...]
+    lifecycle_actions: tuple[str, ...]
+    lifecycle_record_fields: tuple[str, ...]
+    lifecycle_decision_fields: tuple[str, ...]
+    lifecycle_decision_optional_fields: tuple[str, ...]
+    activation_actions: tuple[str, ...]
+    activation_event_fields: tuple[str, ...]
+    gate_statuses: tuple[str, ...]
+    gate_actions: tuple[str, ...]
+    gate_record_fields: tuple[str, ...]
+    gate_target_container_fields: tuple[str, ...]
+    gate_decision_optional_fields: tuple[str, ...]
+    cascade_fields: tuple[str, ...]
+    gate_ref_required_fields: tuple[str, ...]
+    gate_ref_optional_fields: tuple[str, ...]
+    selection_fields: tuple[str, ...]
+    artifact_entry_fields: tuple[str, ...]
+    artifact_revision_fields: tuple[str, ...]
+    artifact_reference_prefix_fields: tuple[str, ...]
+    checkpoint_fields: tuple[str, ...]
+    stage_transition_fields: tuple[str, ...]
+    stage_transition_trigger_prefixes: tuple[str, ...]
+    raw: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class Policy:
-    schema_version: Any
+    schema_version: str
     workflow_version: str
     stage_order: tuple[str, ...]
     gate_order: tuple[str, ...]
+    gate_sequence: tuple[tuple[str, str | None], ...]
+    stage_transitions: dict[str, list[dict[str, Any]]]
+    stage_exit_requirements: dict[str, dict[str, str] | None]
     gate_specs: dict[str, dict[str, Any]]
+    release_gate: str
+    release_targets: tuple[str, ...]
+    initial_release_target: str
     artifact_root: Path
+    snapshot_root: Path
+    runtime: RuntimeContract
     raw: dict[str, Any]

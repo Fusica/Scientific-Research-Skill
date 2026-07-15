@@ -2,13 +2,20 @@
 
 Assemble the manuscript from frozen evidence and claims.
 
+## Keep stable working paths
+
+Continue editing the repository's real manuscript source, claim map, change map, bibliography provenance, build log, render inspection record, and checklist under the shared `policy.artifact_layout` contract.
+
+Use a small registered manifest for source directories, oversized files, figure collections, and other large outputs. The manifest must retain stable IDs, paths, checksums, and enough generation or verification information to audit the referenced material.
+
 ## Establish the paper contract
 
-Record the audience, contribution hierarchy, venue/format constraints, required sections, anonymization and ethics/artifact requirements, release target, and executable paper toolchain. Route material evidence gaps upstream and reopen the relevant Gate when the manuscript needs a claim beyond the frozen contract.
+Record the audience, contribution hierarchy, venue/format constraints, required sections, anonymization and ethics/artifact requirements, release target, and executable paper toolchain. Route material evidence gaps upstream and apply the earliest affected policy Gate's `reopen_when_changed` contract when the manuscript needs a claim beyond the frozen boundary.
 
 For LaTeX projects, prefer the repository's existing `Makefile`, `.latexmkrc`, or documented build command; otherwise use an explicitly declared build such as `latexmk`. Do not assume `pdflatex`, BibTeX, or a fixed directory layout, and do not auto-modify source to make compilation pass. Record the minimum contract:
 
 ```yaml
+release_target: initial_submission
 paper_toolchain:
   source_format: latex
   entrypoint: main.tex
@@ -43,7 +50,7 @@ Assign every central claim and material numerical statement one primary manuscri
 ```yaml
 paper_claim_id: PAPER-CLAIM-001
 claim_id: CLAIM-001
-claim_version: 1
+claim_record_id: CLAIM-RECORD-001
 manuscript_locations:
   - {file: main.tex, anchor_or_section: sec:results}
 role: primary_result
@@ -85,12 +92,10 @@ Before release:
 6. check venue limits, required sections, anonymization, acknowledgments, metadata, ethics, and artifact requirements;
 7. verify every paper change and promised check.
 
-Register `paper.manuscript`, `claim_map`, `change_map`, `bibliography_provenance`, `compilation_log`, `rendered_output`, `render_inspection_record`, and `submission_checklist` for the release package.
+Maintain one stable working artifact for each of `paper.manuscript`, `claim_map`, `change_map`, `bibliography_provenance`, `compilation_log`, `rendered_output`, `render_inspection_record`, and `submission_checklist`, then register their current revisions for the release package. Registration snapshots files, not directories; use a manifest where a role represents a collection.
 
 Keep figure source data, generation code or configuration, publication output, preview, and QA notes traceable through the existing paper and experiment manifests. Mechanical checks may report missing assets, undefined references, build failures, and warnings; they cannot certify scientific writing or visual quality.
 
-## Request external release
+## Hand off for external release
 
-Gate approval binds exact artifact paths and hashes. Use release target `initial_submission` here; `revision_rebuttal` belongs to the revision package.
-
-After explicit human approval for the named target, record `release` through `researchctl`. External submission still requires that authority. Reopen release after a material bound-artifact change or failed consistency, citation, number, render, or anonymization check.
+Use `policy.stages.paper.exit_criteria` and the paper stage's GateRef in `policy.workflow_graph.stage_exit_requirements` as the sole completion, binding, mutability, and reopen contract. After explicit human approval, approve that GateRef through `researchctl` with the policy-required decision review fields. Gate approval does not itself authorize external submission.
