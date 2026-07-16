@@ -48,6 +48,7 @@ from .gates import (
     waived_artifact_roles_for_refs,
 )
 from .policy import retrospective_gate_contract
+from .records import PendingRecordManifest, inspect_record_manifests
 from .store import (
     atomic_write_json,
     default_memory,
@@ -590,6 +591,22 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         raise ResearchCtlError(
             f"artifact entry {stage}.{role}.{artifact_id} is invalid; run doctor"
         )
+
+    if role == policy.runtime.scientific_record_artifact_role:
+        inspection = inspect_record_manifests(
+            root,
+            state,
+            policy,
+            pending=PendingRecordManifest(
+                stage=stage,
+                artifact_id=artifact_id,
+                path=source,
+            ),
+        )
+        if inspection.errors:
+            raise ResearchCtlError(
+                "record manifest is invalid: " + "; ".join(inspection.errors[:5])
+            )
 
     frozen_by = role_is_bound_by_approved_gate(state, policy, stage, role)
     if frozen_by is not None:

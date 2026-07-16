@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +15,38 @@ except ImportError:  # unittest discover -s tests
 
 
 class ResearchCtlV2Test(ResearchProjectTestCase):
+    def record_manifest(
+        self,
+        *,
+        stage: str,
+        source_role: str,
+        source_artifact_id: str,
+        records: list[dict[str, object]],
+    ) -> dict[str, object]:
+        revision = self.artifact_entry(
+            f"{stage}.{source_role}", source_artifact_id
+        )["current_revision"]
+        materialized: list[dict[str, object]] = []
+        for record in records:
+            candidate = dict(record)
+            candidate.setdefault(
+                "source",
+                {
+                    "artifact_role": source_role,
+                    "artifact_id": source_artifact_id,
+                    "revision": revision,
+                    "locator": f"#{candidate['record_id'].lower()}",
+                },
+            )
+            candidate.setdefault("supersedes", None)
+            candidate.setdefault("relations", [])
+            materialized.append(candidate)
+        return {
+            "schema_version": "1.0",
+            "stage": stage,
+            "records": materialized,
+        }
+
     def test_init_creates_only_the_v2_local_contract_and_is_idempotent(self) -> None:
         state = self.load_state()
         self.assertEqual(state["schema_version"], "2.0")
@@ -35,6 +68,368 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
         self.assertIn("state already exists; left unchanged", again.stdout)
         exclude = (self.project / ".git/info/exclude").read_text(encoding="utf-8")
         self.assertEqual(exclude.count(".research/"), 1)
+
+    def test_record_manifest_binds_records_without_creating_second_state(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-001"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        manifest_path = self.project / "work/idea/record-manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        _identifier, _path, registered_manifest = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-001", path=manifest_path
+        )
+
+        self.assertEqual(
+            registered_manifest.returncode, 0, registered_manifest.stderr
+        )
+        state = self.load_state()
+        self.assertNotIn("records", state)
+        self.assertIn("record_manifest", state["artifacts"]["idea"])
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_record_manifest_rejects_invalid_kind_and_unregistered_source(self) -> None:
+        invalid = {
+            "schema_version": "1.0",
+            "stage": "idea",
+            "records": [
+                {
+                    "record_id": "IDEA-001",
+                    "record_kind": "unsupported_kind",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": "MISSING-PORTFOLIO",
+                        "revision": 1,
+                        "locator": "#idea-001",
+                    },
+                    "supersedes": None,
+                    "relations": [],
+                }
+            ],
+        }
+        manifest_path = self.project / "work/idea/invalid-record-manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(invalid, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        before = self.state_path.read_bytes()
+
+        _identifier, _path, rejected = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-INVALID", path=manifest_path
+        )
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("record manifest", rejected.stderr)
+        self.assertIn("record_kind", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(
+            (self.project / ".research/snapshots/idea/record_manifest").exists()
+        )
+
+    def test_record_manifest_revisions_are_append_only(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-APPEND"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        manifest_path = self.project / "work/idea/append-only-records.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        manifest_id, _path, first = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-APPEND", path=manifest_path
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        manifest["records"][0]["source"]["locator"] = "#silently-rewritten"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, rewritten = self.register(
+            "idea.record_manifest", manifest_id, path=manifest_path
+        )
+        self.assertEqual(rewritten.returncode, 2)
+        self.assertIn("append-only", rewritten.stderr)
+        self.assertEqual(
+            self.artifact_entry("idea.record_manifest", manifest_id)[
+                "current_revision"
+            ],
+            1,
+        )
+
+        manifest["records"][0]["source"]["locator"] = "#idea-001"
+        manifest["records"].append(
+            {
+                "record_id": "IDEA-002",
+                "record_kind": "candidate",
+                "source": manifest["records"][0]["source"],
+                "supersedes": "IDEA-001",
+                "relations": [
+                    {"relation": "derived_from", "target_id": "IDEA-001"}
+                ],
+            }
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, appended = self.register(
+            "idea.record_manifest", manifest_id, path=manifest_path
+        )
+        self.assertEqual(appended.returncode, 0, appended.stderr)
+        self.assertEqual(
+            self.artifact_entry("idea.record_manifest", manifest_id)[
+                "current_revision"
+            ],
+            2,
+        )
+
+    def test_record_ids_are_project_unique_and_relations_use_typed_vocabulary(
+        self,
+    ) -> None:
+        idea_source_id, _source, idea_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-UNIQUE"
+        )
+        self.assertEqual(idea_source.returncode, 0, idea_source.stderr)
+        idea_manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=idea_source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        idea_path = self.project / "work/idea/unique-records.json"
+        idea_path.write_text(
+            json.dumps(idea_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, idea_registered = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-UNIQUE", path=idea_path
+        )
+        self.assertEqual(idea_registered.returncode, 0, idea_registered.stderr)
+
+        method_source_id, _source, method_source = self.register(
+            "method.approval_package", "METHOD-PORTFOLIO-UNIQUE"
+        )
+        self.assertEqual(method_source.returncode, 0, method_source.stderr)
+        method_manifest = self.record_manifest(
+            stage="method",
+            source_role="approval_package",
+            source_artifact_id=method_source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        method_path = self.project / "work/method/unique-records.json"
+        method_path.write_text(
+            json.dumps(method_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, duplicate = self.register(
+            "method.record_manifest", "METHOD-RECORDS-UNIQUE", path=method_path
+        )
+        self.assertEqual(duplicate.returncode, 2)
+        self.assertIn("duplicates project record", duplicate.stderr)
+
+        method_manifest["records"][0]["record_id"] = "METHOD-001"
+        method_manifest["records"][0]["relations"] = [
+            {"relation": "guarantees", "target_id": "IDEA-001"}
+        ]
+        method_path.write_text(
+            json.dumps(method_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, unsupported_relation = self.register(
+            "method.record_manifest", "METHOD-RECORDS-UNIQUE", path=method_path
+        )
+        self.assertEqual(unsupported_relation.returncode, 2)
+        self.assertIn("relation 'guarantees' is unsupported", unsupported_relation.stderr)
+
+    def test_record_relations_require_existing_type_compatible_targets(self) -> None:
+        idea_source_id, _source, idea_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-RELATIONS"
+        )
+        self.assertEqual(idea_source.returncode, 0, idea_source.stderr)
+        idea_manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=idea_source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        idea_path = self.project / "work/idea/relation-records.json"
+        idea_path.write_text(
+            json.dumps(idea_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, idea_registered = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-RELATIONS", path=idea_path
+        )
+        self.assertEqual(idea_registered.returncode, 0, idea_registered.stderr)
+
+        claim_source_id, _source, claim_source = self.register(
+            "experiment_results.claim_ledger", "CLAIM-LEDGER-RELATIONS"
+        )
+        self.assertEqual(claim_source.returncode, 0, claim_source.stderr)
+        claim_manifest = self.record_manifest(
+            stage="experiment_results",
+            source_role="claim_ledger",
+            source_artifact_id=claim_source_id,
+            records=[
+                {
+                    "record_id": "CLAIM-001",
+                    "record_kind": "claim",
+                    "relations": [
+                        {"relation": "derived_from", "target_id": "IDEA-001"}
+                    ],
+                }
+            ],
+        )
+        claim_path = self.project / "work/experiment-results/relation-records.json"
+        claim_path.parent.mkdir(parents=True, exist_ok=True)
+        claim_path.write_text(
+            json.dumps(claim_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, claim_registered = self.register(
+            "experiment_results.record_manifest",
+            "CLAIM-RECORDS-RELATIONS",
+            path=claim_path,
+        )
+        self.assertEqual(claim_registered.returncode, 0, claim_registered.stderr)
+
+        paper_source_id, _source, paper_source = self.register(
+            "paper.manuscript", "PAPER-MANUSCRIPT-RELATIONS"
+        )
+        self.assertEqual(paper_source.returncode, 0, paper_source.stderr)
+        paper_manifest = self.record_manifest(
+            stage="paper",
+            source_role="manuscript",
+            source_artifact_id=paper_source_id,
+            records=[
+                {
+                    "record_id": "PAPER-LOCATION-001",
+                    "record_kind": "paper_location",
+                    "relations": [
+                        {"relation": "attempt_of", "target_id": "CLAIM-001"}
+                    ],
+                }
+            ],
+        )
+        paper_path = self.project / "work/paper/relation-records.json"
+        paper_path.parent.mkdir(parents=True, exist_ok=True)
+        paper_path.write_text(
+            json.dumps(paper_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        _identifier, _path, incompatible = self.register(
+            "paper.record_manifest", "PAPER-RECORDS-RELATIONS", path=paper_path
+        )
+        self.assertEqual(incompatible.returncode, 2)
+        self.assertIn("does not allow paper_location -> claim", incompatible.stderr)
+
+        paper_manifest["records"][0]["relations"] = [
+            {"relation": "expresses", "target_id": "MISSING-CLAIM"}
+        ]
+        paper_path.write_text(
+            json.dumps(paper_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, dangling = self.register(
+            "paper.record_manifest", "PAPER-RECORDS-RELATIONS", path=paper_path
+        )
+        self.assertEqual(dangling.returncode, 2)
+        self.assertIn("references unknown record 'MISSING-CLAIM'", dangling.stderr)
+
+        paper_manifest["records"][0]["relations"] = [
+            {"relation": "expresses", "target_id": "CLAIM-001"}
+        ]
+        paper_path.write_text(
+            json.dumps(paper_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, valid = self.register(
+            "paper.record_manifest", "PAPER-RECORDS-RELATIONS", path=paper_path
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+
+        paper_manifest["records"][0]["relations"] = [
+            {"relation": "expresses", "target_id": "MISSING-CLAIM"}
+        ]
+        forged = (
+            json.dumps(paper_manifest, ensure_ascii=False, indent=2) + "\n"
+        ).encode()
+        state = self.load_state()
+        revision = state["artifacts"]["paper"]["record_manifest"][
+            "PAPER-RECORDS-RELATIONS"
+        ]["revisions"][0]
+        paper_path.write_bytes(forged)
+        (self.project / revision["snapshot_path"]).write_bytes(forged)
+        revision["content_hash"] = "sha256:" + hashlib.sha256(forged).hexdigest()
+        revision["size_bytes"] = len(forged)
+        self.write_state(state)
+
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("references unknown record 'MISSING-CLAIM'", doctor.stdout)
+
+    def test_doctor_semantically_revalidates_record_manifest_snapshots(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-DOCTOR"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=source_id,
+            records=[{"record_id": "IDEA-001", "record_kind": "candidate"}],
+        )
+        manifest_path = self.project / "work/idea/doctor-records.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        manifest_id, _path, registered_manifest = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-DOCTOR", path=manifest_path
+        )
+        self.assertEqual(
+            registered_manifest.returncode, 0, registered_manifest.stderr
+        )
+
+        manifest["records"][0]["record_kind"] = "forged_kind"
+        forged = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
+        state = self.load_state()
+        revision = state["artifacts"]["idea"]["record_manifest"][manifest_id][
+            "revisions"
+        ][0]
+        manifest_path.write_bytes(forged)
+        snapshot = self.project / revision["snapshot_path"]
+        snapshot.write_bytes(forged)
+        revision["content_hash"] = "sha256:" + hashlib.sha256(forged).hexdigest()
+        revision["size_bytes"] = len(forged)
+        self.write_state(state)
+
+        doctor = self.run_ctl("doctor")
+
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("record_kind", doctor.stdout)
+        self.assertIn("forged_kind", doctor.stdout)
 
     def test_terminate_records_a_structured_project_decision(self) -> None:
         artifact_id, _source, registered = self.register(

@@ -8,6 +8,7 @@ from typing import Any
 from .artifacts import validate_artifact_registry
 from .constants import Policy
 from .gate_validation import validate_gate_bindings, validate_gate_records
+from .records import inspect_record_manifests
 from .state_validation import (
     validate_activation_history,
     validate_lifecycle_record,
@@ -49,6 +50,8 @@ def validate_state(
         warnings,
         verify_integrity=verify_artifact_integrity,
     )
+    record_inspection = inspect_record_manifests(root, state, policy)
+    errors.extend(record_inspection.errors)
     validate_lifecycle_record(
         root,
         state,

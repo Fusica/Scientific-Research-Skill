@@ -91,5 +91,84 @@
   "stage_transition": {
     "fields": ["from_stage", "to_stage", "trigger", "timestamp"],
     "trigger_prefixes": ["checkpoint", "gate-approve", "gate-reopen"]
+  },
+  "scientific_record": {
+    "manifest_schema_version": "1.0",
+    "artifact_role": "record_manifest",
+    "manifest_fields": ["schema_version", "stage", "records"],
+    "record_fields": [
+      "record_id",
+      "record_kind",
+      "source",
+      "supersedes",
+      "relations"
+    ],
+    "source_fields": ["artifact_role", "artifact_id", "revision", "locator"],
+    "relation_fields": ["relation", "target_id"],
+    "record_kinds": [
+      "candidate",
+      "search_run",
+      "passage_evidence",
+      "experiment",
+      "attempt",
+      "analysis",
+      "claim",
+      "paper_location",
+      "review_concern"
+    ],
+    "relation_kinds": [
+      "derived_from",
+      "discovered_by",
+      "supports",
+      "contradicts",
+      "qualifies",
+      "tests",
+      "attempt_of",
+      "analyzes",
+      "expresses",
+      "addresses"
+    ],
+    "relation_signatures": {
+      "derived_from": {
+        "source_kinds": ["candidate", "claim"],
+        "target_kinds": ["candidate"]
+      },
+      "discovered_by": {
+        "source_kinds": ["passage_evidence"],
+        "target_kinds": ["search_run"]
+      },
+      "supports": {
+        "source_kinds": ["passage_evidence", "analysis"],
+        "target_kinds": ["candidate", "claim"]
+      },
+      "contradicts": {
+        "source_kinds": ["passage_evidence", "analysis"],
+        "target_kinds": ["candidate", "claim"]
+      },
+      "qualifies": {
+        "source_kinds": ["passage_evidence", "analysis"],
+        "target_kinds": ["candidate", "claim"]
+      },
+      "tests": {
+        "source_kinds": ["experiment"],
+        "target_kinds": ["candidate", "claim"]
+      },
+      "attempt_of": {
+        "source_kinds": ["attempt"],
+        "target_kinds": ["experiment"]
+      },
+      "analyzes": {
+        "source_kinds": ["analysis"],
+        "target_kinds": ["attempt", "experiment"]
+      },
+      "expresses": {
+        "source_kinds": ["paper_location"],
+        "target_kinds": ["claim"]
+      },
+      "addresses": {
+        "source_kinds": ["paper_location"],
+        "target_kinds": ["review_concern"]
+      }
+    }
   }
 }

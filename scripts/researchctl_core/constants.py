@@ -69,6 +69,17 @@ class RuntimeContract:
     checkpoint_fields: tuple[str, ...]
     stage_transition_fields: tuple[str, ...]
     stage_transition_trigger_prefixes: tuple[str, ...]
+    scientific_record_manifest_schema_version: str
+    scientific_record_artifact_role: str
+    scientific_record_manifest_fields: tuple[str, ...]
+    scientific_record_fields: tuple[str, ...]
+    scientific_record_source_fields: tuple[str, ...]
+    scientific_record_relation_fields: tuple[str, ...]
+    scientific_record_kinds: tuple[str, ...]
+    scientific_record_relation_kinds: tuple[str, ...]
+    scientific_record_relation_signatures: dict[
+        str, tuple[tuple[str, ...], tuple[str, ...]]
+    ]
     raw: dict[str, Any]
 
 

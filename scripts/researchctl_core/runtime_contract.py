@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    ARTIFACT_ROLE_RE,
     DEFAULT_RUNTIME_CONTRACT_PATH,
     ResearchCtlError,
     RuntimeContract,
@@ -49,6 +50,14 @@ def _fields(value: Any, label: str) -> tuple[str, ...]:
     if len(value) != len(set(value)):
         raise ResearchCtlError(f"runtime contract {label} contains duplicates")
     return tuple(value)
+
+
+def _nonempty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ResearchCtlError(
+            f"runtime contract {label} must be a non-empty string"
+        )
+    return value
 
 
 def _exact_fields(
@@ -98,6 +107,36 @@ def _require_runtime_capabilities(
         )
 
 
+def _relation_signatures(
+    value: Any,
+    *,
+    relation_kinds: tuple[str, ...],
+    record_kinds: tuple[str, ...],
+) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    signatures = _object(value, "scientific_record.relation_signatures")
+    if set(signatures) != set(relation_kinds):
+        raise ResearchCtlError(
+            "runtime contract scientific_record.relation_signatures must define "
+            "every relation kind exactly once"
+        )
+    known_record_kinds = set(record_kinds)
+    materialized: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for relation_kind in relation_kinds:
+        label = f"scientific_record.relation_signatures.{relation_kind}"
+        signature = _object(signatures.get(relation_kind), label)
+        _exact_fields(signature, {"source_kinds", "target_kinds"}, label)
+        source_kinds = _fields(signature.get("source_kinds"), f"{label}.source_kinds")
+        target_kinds = _fields(signature.get("target_kinds"), f"{label}.target_kinds")
+        unknown = (set(source_kinds) | set(target_kinds)) - known_record_kinds
+        if unknown:
+            raise ResearchCtlError(
+                f"runtime contract {label} uses unknown record kinds: "
+                + ", ".join(sorted(unknown))
+            )
+        materialized[relation_kind] = (source_kinds, target_kinds)
+    return materialized
+
+
 def load_runtime_contract() -> RuntimeContract:
     """Load and validate the single fixed state and decision schema."""
 
@@ -135,6 +174,7 @@ def load_runtime_contract() -> RuntimeContract:
             "artifact",
             "checkpoint",
             "stage_transition",
+            "scientific_record",
         },
         "root",
     )
@@ -159,6 +199,9 @@ def load_runtime_contract() -> RuntimeContract:
     artifact = _object(raw.get("artifact"), "artifact")
     checkpoint = _object(raw.get("checkpoint"), "checkpoint")
     transition = _object(raw.get("stage_transition"), "stage_transition")
+    scientific_record = _object(
+        raw.get("scientific_record"), "scientific_record"
+    )
     _exact_fields(state, {"required_fields"}, "state")
     _exact_fields(decision, {"required_fields"}, "decision")
     _exact_fields(
@@ -195,6 +238,35 @@ def load_runtime_contract() -> RuntimeContract:
     )
     _exact_fields(checkpoint, {"fields"}, "checkpoint")
     _exact_fields(transition, {"fields", "trigger_prefixes"}, "stage_transition")
+    _exact_fields(
+        scientific_record,
+        {
+            "manifest_schema_version",
+            "artifact_role",
+            "manifest_fields",
+            "record_fields",
+            "source_fields",
+            "relation_fields",
+            "record_kinds",
+            "relation_kinds",
+            "relation_signatures",
+        },
+        "scientific_record",
+    )
+
+    scientific_record_manifest_schema_version = _nonempty_string(
+        scientific_record.get("manifest_schema_version"),
+        "scientific_record.manifest_schema_version",
+    )
+    scientific_record_artifact_role = _nonempty_string(
+        scientific_record.get("artifact_role"),
+        "scientific_record.artifact_role",
+    )
+    if not ARTIFACT_ROLE_RE.fullmatch(scientific_record_artifact_role):
+        raise ResearchCtlError(
+            "runtime contract scientific_record.artifact_role must use "
+            "lower_snake_case"
+        )
 
     values = {
         "state.required_fields": _fields(
@@ -268,6 +340,30 @@ def load_runtime_contract() -> RuntimeContract:
             transition.get("trigger_prefixes"),
             "stage_transition.trigger_prefixes",
         ),
+        "scientific_record.manifest_fields": _fields(
+            scientific_record.get("manifest_fields"),
+            "scientific_record.manifest_fields",
+        ),
+        "scientific_record.record_fields": _fields(
+            scientific_record.get("record_fields"),
+            "scientific_record.record_fields",
+        ),
+        "scientific_record.source_fields": _fields(
+            scientific_record.get("source_fields"),
+            "scientific_record.source_fields",
+        ),
+        "scientific_record.relation_fields": _fields(
+            scientific_record.get("relation_fields"),
+            "scientific_record.relation_fields",
+        ),
+        "scientific_record.record_kinds": _fields(
+            scientific_record.get("record_kinds"),
+            "scientific_record.record_kinds",
+        ),
+        "scientific_record.relation_kinds": _fields(
+            scientific_record.get("relation_kinds"),
+            "scientific_record.relation_kinds",
+        ),
     }
     for left_label, right_label in (
         ("decision.required_fields", "lifecycle.decision_fields"),
@@ -331,6 +427,22 @@ def load_runtime_contract() -> RuntimeContract:
             "stage_transition.fields",
             {"from_stage", "to_stage", "trigger", "timestamp"},
         ),
+        (
+            "scientific_record.manifest_fields",
+            {"schema_version", "stage", "records"},
+        ),
+        (
+            "scientific_record.record_fields",
+            {"record_id", "record_kind", "source", "supersedes", "relations"},
+        ),
+        (
+            "scientific_record.source_fields",
+            {"artifact_role", "artifact_id", "revision", "locator"},
+        ),
+        (
+            "scientific_record.relation_fields",
+            {"relation", "target_id"},
+        ),
         ("lifecycle.statuses", {"active", "terminated", "completed"}),
         ("lifecycle.actions", {"terminate", "complete", "reopen"}),
         ("activation.actions", {"enable", "disable"}),
@@ -351,8 +463,43 @@ def load_runtime_contract() -> RuntimeContract:
             "gate.decision_optional_fields",
             {"approval_mode", "waived_artifact_roles", "selection", "cascade"},
         ),
+        (
+            "scientific_record.record_kinds",
+            {
+                "candidate",
+                "search_run",
+                "passage_evidence",
+                "experiment",
+                "attempt",
+                "analysis",
+                "claim",
+                "paper_location",
+                "review_concern",
+            },
+        ),
+        (
+            "scientific_record.relation_kinds",
+            {
+                "derived_from",
+                "discovered_by",
+                "supports",
+                "contradicts",
+                "qualifies",
+                "tests",
+                "attempt_of",
+                "analyzes",
+                "expresses",
+                "addresses",
+            },
+        ),
     ):
         _require_runtime_capabilities(values[label], required, label)
+
+    scientific_record_relation_signatures = _relation_signatures(
+        scientific_record.get("relation_signatures"),
+        relation_kinds=values["scientific_record.relation_kinds"],
+        record_kinds=values["scientific_record.record_kinds"],
+    )
 
     return RuntimeContract(
         contract_version=contract_version,
@@ -389,5 +536,26 @@ def load_runtime_contract() -> RuntimeContract:
         stage_transition_trigger_prefixes=values[
             "stage_transition.trigger_prefixes"
         ],
+        scientific_record_manifest_schema_version=(
+            scientific_record_manifest_schema_version
+        ),
+        scientific_record_artifact_role=scientific_record_artifact_role,
+        scientific_record_manifest_fields=values[
+            "scientific_record.manifest_fields"
+        ],
+        scientific_record_fields=values["scientific_record.record_fields"],
+        scientific_record_source_fields=values[
+            "scientific_record.source_fields"
+        ],
+        scientific_record_relation_fields=values[
+            "scientific_record.relation_fields"
+        ],
+        scientific_record_kinds=values["scientific_record.record_kinds"],
+        scientific_record_relation_kinds=values[
+            "scientific_record.relation_kinds"
+        ],
+        scientific_record_relation_signatures=(
+            scientific_record_relation_signatures
+        ),
         raw=raw,
     )

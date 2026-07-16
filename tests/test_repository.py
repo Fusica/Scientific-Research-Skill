@@ -368,6 +368,33 @@ class RepositoryContractTest(unittest.TestCase):
         def unsupported_lifecycle_status(contract: dict[str, object]) -> None:
             contract["lifecycle"]["statuses"] = ["active", "paused"]
 
+        def scientific_record_contract_drops_kind(
+            contract: dict[str, object]
+        ) -> None:
+            contract["scientific_record"]["record_kinds"].remove("attempt")
+
+        def scientific_record_contract_renames_field(
+            contract: dict[str, object]
+        ) -> None:
+            contract["scientific_record"]["source_fields"] = [
+                "artifact_role",
+                "artifact_id",
+                "version",
+                "locator",
+            ]
+
+        def scientific_record_contract_drops_relation_signature(
+            contract: dict[str, object]
+        ) -> None:
+            del contract["scientific_record"]["relation_signatures"]["attempt_of"]
+
+        def scientific_record_contract_uses_unknown_endpoint_kind(
+            contract: dict[str, object]
+        ) -> None:
+            contract["scientific_record"]["relation_signatures"]["expresses"][
+                "source_kinds"
+            ] = ["paragraph"]
+
         mutations = (
             unsupported_version,
             blank_state_schema,
@@ -391,6 +418,10 @@ class RepositoryContractTest(unittest.TestCase):
             gate_ref_overlap,
             unsupported_gate_action,
             unsupported_lifecycle_status,
+            scientific_record_contract_drops_kind,
+            scientific_record_contract_renames_field,
+            scientific_record_contract_drops_relation_signature,
+            scientific_record_contract_uses_unknown_endpoint_kind,
         )
         with tempfile.TemporaryDirectory() as directory:
             runtime_path = Path(directory) / "runtime-contract.json"
@@ -518,6 +549,52 @@ class RepositoryContractTest(unittest.TestCase):
                     ):
                         with self.assertRaises(ResearchCtlError):
                             load_policy()
+
+    def test_record_manifests_are_registered_artifacts_not_state(self) -> None:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+        state_template = json.loads(
+            (ROOT / "skills/research/assets/state.template.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        policy = json.loads(
+            (ROOT / "skills/research/references/policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        records_source = (
+            ROOT / "scripts/researchctl_core/records.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            contract["scientific_record"]["artifact_role"], "record_manifest"
+        )
+        self.assertEqual(
+            set(contract["scientific_record"]["record_kinds"]),
+            {
+                "candidate",
+                "search_run",
+                "passage_evidence",
+                "experiment",
+                "attempt",
+                "analysis",
+                "claim",
+                "paper_location",
+                "review_concern",
+            },
+        )
+        self.assertEqual(
+            set(contract["scientific_record"]["relation_signatures"]),
+            set(contract["scientific_record"]["relation_kinds"]),
+        )
+        self.assertNotIn("records", state_template)
+        self.assertIn(
+            "optional stage record manifest",
+            policy["artifact_layout"]["instruction"],
+        )
+        self.assertIn("artifact register record_manifest", readme)
+        self.assertIn("inspect_record_manifests", records_source)
 
     def test_policy_semantic_names_drive_release_and_approval_modes(self) -> None:
         candidate = renamed_semantic_policy()

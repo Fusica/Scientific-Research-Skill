@@ -34,6 +34,18 @@ Use `policy.authority_boundary` and the repository scientific boundaries.
 **Structured decision defense — current**
 Use `policy.workspace_lifecycle.decision_review` for semantics and `runtime-contract.json` `decision` for field shape.
 
+**Scientific record — current**
+A stable mechanical identity for one research object, bound to an exact registered artifact revision and an opaque locator in that artifact. It contains no scientific judgment payload.
+
+**Record manifest — current**
+An append-only registered artifact that declares stage-local Scientific records and their typed links without storing them in workflow state.
+
+**Record relation — current**
+A typed directional link between stable record IDs. Target existence and endpoint-kind compatibility are mechanically validatable, but its scientific truth and sufficiency remain Research judgment.
+
+**Research judgment — current policy**
+Researcher-authored interpretation of novelty, mechanism, evidence strength, exclusions, causal meaning, adequacy, or scientific value. It remains in canonical research artifacts and is never certified by record validation.
+
 ## Capability claims
 
 **Process capability — accepted**

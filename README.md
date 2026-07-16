@@ -196,6 +196,40 @@ researchctl doctor
 
 artifact、revision、snapshot、cardinality 与大文件 manifest 的唯一语义合同在 [`policy.artifact_layout`](skills/research/references/policy.yaml)；机器字段与限制在 [`runtime-contract.json`](skills/research/assets/runtime-contract.json)。公共写入只通过 `researchctl`，`.research/state.json`、lock、memory 和派生 Dashboard 都不是科研证据。
 
+### 类型化科研记录
+
+`record_manifest` 的权威语义只在 [`policy.artifact_layout`](skills/research/references/policy.yaml)、[`runtime-contract.json` 的 `scientific_record`](skills/research/assets/runtime-contract.json) 和 [ADR 0003](decisions/0003-registered-scientific-record-manifests.md) 中定义。下面只是非规范用法示例：
+
+```json
+{
+  "schema_version": "1.0",
+  "stage": "idea",
+  "records": [
+    {
+      "record_id": "IDEA-001",
+      "record_kind": "candidate",
+      "source": {
+        "artifact_role": "idea_card",
+        "artifact_id": "IDEA-PORTFOLIO-001",
+        "revision": 1,
+        "locator": "#idea-001"
+      },
+      "supersedes": null,
+      "relations": []
+    }
+  ]
+}
+```
+
+```bash
+researchctl artifact register record_manifest --stage idea \
+  --path .research/artifacts/idea/record-manifest.json \
+  --artifact-id IDEA-RECORDS-001
+researchctl doctor
+```
+
+`artifact register` 与 `doctor` 都按上述权威合同检查；记录仍只是普通 registered artifact，state 不增加顶层 record store。科学判断与后续 Trace Graph 边界见 ADR，不由 README 增补规则。
+
 Gate、GateRef、stage transition、release target 与条件化 approval mode 同样只由 policy 定义，decision/cascade 的机器形状只由 runtime contract 定义。`contract_version: 2.0` 的 writer-owned 字段与分支枚举会在加载时 fail closed；可选 decision 字段可以向后兼容扩展，破坏性字段改名或删除必须升级 contract version 与 runtime，不能先加载成功再在 writer/doctor 阶段失败。CLI 的通用入口是 `--approval-mode <policy-key>`；`--retrospective-revision-import` 只是由 policy `cli_flag` 生成的兼容别名，不再决定内部 mode ID。README 只展示命令，不复制这些规则。
 
 只有 policy 中的窄资格成立且研究者明确授权时，才加载[返修兼容步骤](skills/research/references/retrospective-revision-import.md)；它不是通用导入、Gate 继承或 Hash 绕过。

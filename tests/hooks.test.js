@@ -1128,6 +1128,13 @@ test("policy loading rejects malformed authority and exercises environment fallb
     (runtime) => { runtime.gate.decision_required_fields = ["decision_id"]; },
     (runtime) => { runtime.gate.record_fields.push("targets"); },
     (runtime) => { runtime.stage_transition.trigger_prefixes = ["checkpoint"]; },
+    (runtime) => { delete runtime.scientific_record.artifact_role; },
+    (runtime) => { runtime.scientific_record.record_kinds = ["candidate"]; },
+    (runtime) => { runtime.scientific_record.source_fields = ["artifact_id"]; },
+    (runtime) => { delete runtime.scientific_record.relation_signatures.attempt_of; },
+    (runtime) => {
+      runtime.scientific_record.relation_signatures.expresses.source_kinds = ["paragraph"];
+    },
   ];
   for (const mutate of invalidRuntimeMutations) {
     assert.deepEqual(runRuntime(mutate), {});

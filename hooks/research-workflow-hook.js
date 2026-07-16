@@ -341,6 +341,7 @@ function loadRuntimeContract() {
   if (!sameFieldSet(runtime, [
     "contract_version", "state_schema_version", "state", "decision", "lifecycle",
     "activation", "gate", "artifact", "checkpoint", "stage_transition",
+    "scientific_record",
   ]) || runtime.contract_version !== "2.0"
     || typeof runtime.state_schema_version !== "string"
     || !runtime.state_schema_version.trim()) return null;
@@ -367,6 +368,33 @@ function loadRuntimeContract() {
       || fieldNames.some((field) => !uniqueStringList(section[field]))) {
       return null;
     }
+  }
+  const scientificRecord = runtime.scientific_record;
+  const scientificRecordLists = [
+    "manifest_fields", "record_fields", "source_fields", "relation_fields",
+    "record_kinds", "relation_kinds",
+  ];
+  if (!sameFieldSet(scientificRecord, [
+    "manifest_schema_version", "artifact_role", ...scientificRecordLists,
+    "relation_signatures",
+  ])
+    || typeof scientificRecord.manifest_schema_version !== "string"
+    || !scientificRecord.manifest_schema_version.trim()
+    || typeof scientificRecord.artifact_role !== "string"
+    || !/^[a-z][a-z0-9_]*$/.test(scientificRecord.artifact_role)
+    || scientificRecordLists.some(
+      (field) => !uniqueStringList(scientificRecord[field]),
+    )) return null;
+  const relationSignatures = scientificRecord.relation_signatures;
+  if (!sameFieldSet(relationSignatures, scientificRecord.relation_kinds)) return null;
+  for (const relationKind of scientificRecord.relation_kinds) {
+    const signature = relationSignatures[relationKind];
+    if (!sameFieldSet(signature, ["source_kinds", "target_kinds"])
+      || !uniqueStringList(signature.source_kinds)
+      || !uniqueStringList(signature.target_kinds)
+      || [...signature.source_kinds, ...signature.target_kinds].some(
+        (kind) => !scientificRecord.record_kinds.includes(kind),
+      )) return null;
   }
   const disjoint = (left, right) => !left.some((field) => right.includes(field));
   for (const [left, right] of [
@@ -414,6 +442,16 @@ function loadRuntimeContract() {
     [runtime.stage_transition.fields, [
       "from_stage", "to_stage", "trigger", "timestamp",
     ]],
+    [runtime.scientific_record.manifest_fields, [
+      "schema_version", "stage", "records",
+    ]],
+    [runtime.scientific_record.record_fields, [
+      "record_id", "record_kind", "source", "supersedes", "relations",
+    ]],
+    [runtime.scientific_record.source_fields, [
+      "artifact_role", "artifact_id", "revision", "locator",
+    ]],
+    [runtime.scientific_record.relation_fields, ["relation", "target_id"]],
   ];
   if (fixedV2Fields.some(([value, expected]) => !sameStringSet(value, expected))) {
     return null;
@@ -422,6 +460,14 @@ function loadRuntimeContract() {
     [runtime.lifecycle.decision_optional_fields, ["gate_ref", "gate_decision_id"]],
     [runtime.gate.decision_optional_fields, [
       "approval_mode", "waived_artifact_roles", "selection", "cascade",
+    ]],
+    [runtime.scientific_record.record_kinds, [
+      "candidate", "search_run", "passage_evidence", "experiment", "attempt",
+      "analysis", "claim", "paper_location", "review_concern",
+    ]],
+    [runtime.scientific_record.relation_kinds, [
+      "derived_from", "discovered_by", "supports", "contradicts", "qualifies",
+      "tests", "attempt_of", "analyzes", "expresses", "addresses",
     ]],
   ]) {
     if (required.some((field) => !value.includes(field))) return null;
