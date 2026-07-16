@@ -34,6 +34,38 @@ Use `policy.authority_boundary` and the repository scientific boundaries.
 **Structured decision defense — current**
 Use `policy.workspace_lifecycle.decision_review` for semantics and `runtime-contract.json` `decision` for field shape.
 
+## Capability claims
+
+**Process capability — accepted**
+The observed ability to complete a declared research-workflow boundary with traceable, recoverable records. It is not a judgment of scientific outcome quality.
+
+**Core — accepted**
+The provider-neutral Plugin boundary: one public Skill, one policy, one state writer, project-local state and memory, and mechanical Hooks and validators.
+
+**Reference Stack — accepted**
+The smallest named set of external adapters, tools, and human actions required to close an end-to-end capability that Core deliberately does not perform alone.
+
+**End-to-end capability — accepted**
+A process capability closed by Core plus its declared Reference Stack, including failure recovery and auditable hand-offs across their authority boundary.
+
+**Current capability status — accepted**
+Implemented behavior available in the named release. Current does not imply that a comparative or end-to-end benchmark has passed.
+
+**Target capability status — accepted**
+An acceptance objective that is not yet a claim about the current release.
+
+**Benchmark-verified capability status — accepted**
+A capability demonstrated by a named version against a frozen harness, corpus, date, and retained report.
+
+**High — accepted capability level**
+The declared scope is process-complete, evidence-traceable, recoverable at material failures, and validated by deterministic and representative-scenario checks.
+
+**Very high — accepted capability level**
+High plus end-to-end closure within the declared boundary, with cross-stage, adapter, failure-recovery, adversarial, and offline-audit acceptance evidence where applicable.
+
+**Approaches Evo — accepted comparison result**
+A statistical non-inferiority result from the frozen two-track benchmark. It is neither a synonym for Very high nor a guarantee of real novelty.
+
 ## Exploration and experiments
 
 **Exploration — current**

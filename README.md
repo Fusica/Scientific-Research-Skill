@@ -34,6 +34,25 @@ Codex Plugin
 
 已接受的维护者设计决策记录在 [`decisions/`](decisions/)，当前术语与“已实现／仅意图／明确延期”的能力区别见 [`decisions/glossary.md`](decisions/glossary.md)。这些文件不属于 Plugin runtime 或项目研究状态。
 
+## 能力声明边界
+
+能力等级描述的是有证据支撑的**过程能力**，不是科研结果质量。任何公开的六维比较都必须同时标明系统边界（`Core` 或 `Core + Reference Stack`）、证据状态（`Current`、`Target` 或 `Benchmark-verified`），以及验证版本、语料、日期和报告。完整定义与取舍见 [`ADR 0002`](decisions/0002-evidence-qualified-capability-claims.md)。
+
+下面是 vNext 的验收目标，当前状态全部是 **Target**，不能表述为当前版本已经达到：
+
+| 维度 | 系统边界 | Target |
+| --- | --- | --- |
+| 流程治理 | Core | 很高 |
+| 项目级审计 | Core | 很高 |
+| 实验执行 | Core + Reference Stack | 端到端很高 |
+| 论文生产与投稿准备 | Core + Reference Stack | 端到端很高 |
+| 知识管理 | Project-local Core | 高 |
+| 创新激发流程 | Track A: Core；Track A + B: declared native stack | 接近 EvoSkills／接近 Evo 完整生态 |
+
+“高”要求声明范围内流程完整、证据可追溯、关键失败可恢复，并通过确定性与代表性场景验收；“很高”还要求声明边界内的端到端闭环，以及适用的跨阶段、适配器、故障恢复、对抗性和离线审计证据。“接近 Evo”只来自冻结双轨 benchmark 的统计非劣效结论，不是“很高”的同义词。通过 Track A 只能声明 Core 创新激发流程接近 EvoSkills；Track A 与 Track B 均通过后，才能声明端到端流程接近 EvoSkills + EvoScientist 生态。
+
+上述标签不保证科研正确性、统计有效性、真实创新、论文质量或录用。投稿能力止于可审计的投稿准备包；实际外部投稿、昂贵计算、破坏性操作、安全相关硬件执行以及所有 Gate 和 lifecycle 决策仍保留既有人工权限边界。
+
 ## 六阶段与四个 Gate
 
 <p align="center">

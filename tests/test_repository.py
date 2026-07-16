@@ -1007,6 +1007,31 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("decisions/glossary.md", domain)
         self.assertIn("Do not create `CONTEXT.md`", domain)
 
+    def test_public_capability_claims_are_boundary_qualified(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        glossary = (ROOT / "decisions/glossary.md").read_text(encoding="utf-8")
+        decision = (
+            ROOT / "decisions/0002-evidence-qualified-capability-claims.md"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "Core + Reference Stack",
+            "Current",
+            "Target",
+            "Benchmark-verified",
+            "不保证科研正确性、统计有效性、真实创新、论文质量或录用",
+        ):
+            self.assertIn(required, readme)
+        for required in (
+            "**Process capability — accepted**",
+            "**High — accepted capability level**",
+            "**Very high — accepted capability level**",
+            "**Approaches Evo — accepted comparison result**",
+        ):
+            self.assertIn(required, glossary)
+        self.assertIn("Every public capability claim must name", decision)
+        self.assertIn("Track A and Track B", decision)
+
     def test_external_repositories_remain_links_and_root_license_is_preserved(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for url in (
