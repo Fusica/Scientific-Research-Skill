@@ -411,9 +411,29 @@ def validate_plugin() -> list[str]:
         errors.append(f"researchctl_core: missing {', '.join(sorted(missing))}")
     if "migration.py" in modules:
         errors.append("researchctl_core: v2 must not ship an automatic migration module")
-    for legacy in (ROOT / "contracts", ROOT / "profiles", ROOT / "docs"):
+    for legacy in (ROOT / "contracts", ROOT / "profiles"):
         if legacy.exists() and any(legacy.rglob("*")):
             errors.append(f"{legacy.name}: legacy runtime layer must remain removed")
+    expected_agent_docs = {
+        Path("docs/agents/domain.md"),
+        Path("docs/agents/issue-tracker.md"),
+        Path("docs/agents/triage-labels.md"),
+    }
+    actual_docs = {
+        path.relative_to(ROOT)
+        for path in (ROOT / "docs").rglob("*")
+        if path.is_file()
+    }
+    if actual_docs != expected_agent_docs:
+        missing = sorted(str(path) for path in expected_agent_docs - actual_docs)
+        unexpected = sorted(str(path) for path in actual_docs - expected_agent_docs)
+        if missing:
+            errors.append(f"docs/agents: missing maintainer config {', '.join(missing)}")
+        if unexpected:
+            errors.append(
+                "docs: only maintainer agent config is allowed; unexpected "
+                + ", ".join(unexpected)
+            )
     for stale in ("vendor", "THIRD_PARTY_NOTICES.md", "upstreams.lock.yaml"):
         if (ROOT / stale).exists():
             errors.append(f"{stale}: external references must remain link-only")

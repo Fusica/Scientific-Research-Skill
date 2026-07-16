@@ -989,6 +989,24 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertNotIn("overview.md", source)
         self.assertNotIn("round_id", source)
 
+    def test_docs_contains_only_matt_maintainer_configuration(self) -> None:
+        docs = {
+            path.relative_to(ROOT)
+            for path in (ROOT / "docs").rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(
+            docs,
+            {
+                Path("docs/agents/domain.md"),
+                Path("docs/agents/issue-tracker.md"),
+                Path("docs/agents/triage-labels.md"),
+            },
+        )
+        domain = (ROOT / "docs/agents/domain.md").read_text(encoding="utf-8")
+        self.assertIn("decisions/glossary.md", domain)
+        self.assertIn("Do not create `CONTEXT.md`", domain)
+
     def test_external_repositories_remain_links_and_root_license_is_preserved(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for url in (

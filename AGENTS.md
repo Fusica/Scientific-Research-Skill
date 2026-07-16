@@ -53,6 +53,25 @@ not an overview authority, state format, or memory store.
 - Preserve the root license. Re-express externally inspired behavior locally rather
   than copying upstream source into this repository.
 
+## Agent skills
+
+### Issue tracker
+
+Engineering plans, Wayfinder maps, and implementation tickets live in GitHub
+Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical Matt-skill triage label names. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. The existing `decisions/glossary.md` and
+numbered ADRs under `decisions/` are the only maintainer-domain documentation;
+do not create a parallel `CONTEXT.md` or `docs/adr/` authority. See
+`docs/agents/domain.md`.
+
 ## Required validation
 
 Run all of the following before handing off a change:
