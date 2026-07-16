@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .adapters import (
+    PendingAdapterExchange,
+    inspect_adapter_exchanges,
+    verify_adapter_dispatch,
+)
 from .artifacts import (
     create_revision_snapshot,
     current_artifact_revision,
@@ -592,6 +597,8 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
             f"artifact entry {stage}.{role}.{artifact_id} is invalid; run doctor"
         )
 
+    registered_at = next_state_timestamp(state)
+    adapter_warnings: tuple[str, ...] = ()
     if role == policy.runtime.scientific_record_artifact_role:
         inspection = inspect_record_manifests(
             root,
@@ -607,6 +614,24 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
             raise ResearchCtlError(
                 "record manifest is invalid: " + "; ".join(inspection.errors[:5])
             )
+    if role == policy.runtime.adapter_exchange_artifact_role:
+        adapter_inspection = inspect_adapter_exchanges(
+            root,
+            state,
+            policy,
+            pending=PendingAdapterExchange(
+                stage=stage,
+                artifact_id=artifact_id,
+                path=source,
+                registered_at=registered_at,
+            ),
+        )
+        if adapter_inspection.errors:
+            raise ResearchCtlError(
+                "adapter exchange is invalid: "
+                + "; ".join(adapter_inspection.errors[:5])
+            )
+        adapter_warnings = adapter_inspection.warnings
 
     frozen_by = role_is_bound_by_approved_gate(state, policy, stage, role)
     if frozen_by is not None:
@@ -615,7 +640,6 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
             "reopen that Gate before registering another revision"
         )
     next_revision = 1 if current is None else int(current["revision"]) + 1
-    registered_at = next_state_timestamp(state)
     snapshot_path = create_revision_snapshot(
         root,
         policy,
@@ -660,11 +684,42 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         f"registered artifact: {stage}.{role} {artifact_id} r{next_revision} "
         f"{content_hash} snapshot={snapshot_path}"
     )
+    for warning in adapter_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     if external:
         print(
             "warning: artifact source is outside the project and may not be portable",
             file=sys.stderr,
         )
+    return 0
+
+
+def cmd_adapter_verify(
+    root: Path, policy: Policy, args: argparse.Namespace
+) -> int:
+    state = load_state(root)
+    require_compatible_state(state, policy)
+    _require_active_lifecycle(state)
+    errors, _warnings = validate_state(
+        root,
+        state,
+        policy,
+        verify_artifact_integrity=True,
+    )
+    if errors:
+        raise ResearchCtlError(
+            "state is invalid; run `researchctl doctor`: "
+            + "; ".join(errors[:3])
+        )
+    envelope = verify_adapter_dispatch(
+        root,
+        state,
+        policy,
+        request_id=args.request_id,
+        attempt_id=args.attempt_id,
+        retry_of_attempt_id=args.retry_of_attempt_id,
+    )
+    print(json.dumps(envelope, ensure_ascii=False, indent=2))
     return 0
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .adapters import inspect_adapter_exchanges
 from .artifacts import validate_artifact_registry
 from .constants import Policy
 from .gate_validation import validate_gate_bindings, validate_gate_records
@@ -52,6 +53,9 @@ def validate_state(
     )
     record_inspection = inspect_record_manifests(root, state, policy)
     errors.extend(record_inspection.errors)
+    adapter_inspection = inspect_adapter_exchanges(root, state, policy)
+    errors.extend(adapter_inspection.errors)
+    warnings.extend(adapter_inspection.warnings)
     validate_lifecycle_record(
         root,
         state,

@@ -80,6 +80,22 @@ class RuntimeContract:
     scientific_record_relation_signatures: dict[
         str, tuple[tuple[str, ...], tuple[str, ...]]
     ]
+    adapter_exchange_manifest_schema_version: str
+    adapter_exchange_protocol_version: str
+    adapter_exchange_artifact_role: str
+    adapter_exchange_manifest_fields: tuple[str, ...]
+    adapter_exchange_request_fields: tuple[str, ...]
+    adapter_exchange_payload_fields: tuple[str, ...]
+    adapter_exchange_gate_binding_fields: tuple[str, ...]
+    adapter_exchange_human_authorization_fields: tuple[str, ...]
+    adapter_exchange_retry_policy_fields: tuple[str, ...]
+    adapter_exchange_receipt_fields: tuple[str, ...]
+    adapter_exchange_adapter_fields: tuple[str, ...]
+    adapter_exchange_verification_fields: tuple[str, ...]
+    adapter_exchange_operation_kinds: tuple[str, ...]
+    adapter_exchange_effect_classes: tuple[str, ...]
+    adapter_exchange_retry_modes: tuple[str, ...]
+    adapter_exchange_receipt_statuses: tuple[str, ...]
     raw: dict[str, Any]
 
 

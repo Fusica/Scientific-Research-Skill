@@ -28,6 +28,7 @@ Load `references/retrospective-revision-import.md` only after the user explicitl
 - Make artifact, Gate, lifecycle, activation, and checkpoint changes only through `researchctl`; never edit control fields directly. Gate and lifecycle decisions require explicit human direction and the structured review fields required by policy. Never infer approval.
 - When evidence invalidates an approved boundary, reopen the earliest affected GateRef named by policy before changing protected material. Let `researchctl` compute downstream cascade and stage movement; do not reconstruct them in prose or state edits.
 - Run `researchctl doctor` before approval. Use `checkpoint` for bounded recovery summaries, and keep `.research/memory.md` limited to durable facts, decisions, failures, open questions, and the next action.
+- For a supported external operation, follow `policy.adapter_authority`: persist an `adapter_exchange` request through `artifact register`, run `adapter verify` for a new attempt, append its first `accepted` receipt, and register that durable journal before any side effect. Only then may the external Adapter consume the bound immutable snapshots and act; append later factual receipts as superseding revisions. A receipt never approves a Gate or scientific claim. Preserve `unknown` and reconcile it before retry unless the registered policy is explicitly idempotent.
 - Do not cross costly, destructive, safety-relevant, hardware, publication, submission, or other external-action boundaries without the authority required by the user and policy.
 
 ## Hand off

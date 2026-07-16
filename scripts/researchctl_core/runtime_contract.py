@@ -175,6 +175,7 @@ def load_runtime_contract() -> RuntimeContract:
             "checkpoint",
             "stage_transition",
             "scientific_record",
+            "adapter_exchange",
         },
         "root",
     )
@@ -201,6 +202,9 @@ def load_runtime_contract() -> RuntimeContract:
     transition = _object(raw.get("stage_transition"), "stage_transition")
     scientific_record = _object(
         raw.get("scientific_record"), "scientific_record"
+    )
+    adapter_exchange = _object(
+        raw.get("adapter_exchange"), "adapter_exchange"
     )
     _exact_fields(state, {"required_fields"}, "state")
     _exact_fields(decision, {"required_fields"}, "decision")
@@ -253,6 +257,28 @@ def load_runtime_contract() -> RuntimeContract:
         },
         "scientific_record",
     )
+    _exact_fields(
+        adapter_exchange,
+        {
+            "manifest_schema_version",
+            "protocol_version",
+            "artifact_role",
+            "manifest_fields",
+            "request_fields",
+            "payload_fields",
+            "gate_binding_fields",
+            "human_authorization_fields",
+            "retry_policy_fields",
+            "receipt_fields",
+            "adapter_fields",
+            "verification_fields",
+            "operation_kinds",
+            "effect_classes",
+            "retry_modes",
+            "receipt_statuses",
+        },
+        "adapter_exchange",
+    )
 
     scientific_record_manifest_schema_version = _nonempty_string(
         scientific_record.get("manifest_schema_version"),
@@ -266,6 +292,28 @@ def load_runtime_contract() -> RuntimeContract:
         raise ResearchCtlError(
             "runtime contract scientific_record.artifact_role must use "
             "lower_snake_case"
+        )
+    adapter_exchange_manifest_schema_version = _nonempty_string(
+        adapter_exchange.get("manifest_schema_version"),
+        "adapter_exchange.manifest_schema_version",
+    )
+    adapter_exchange_protocol_version = _nonempty_string(
+        adapter_exchange.get("protocol_version"),
+        "adapter_exchange.protocol_version",
+    )
+    adapter_exchange_artifact_role = _nonempty_string(
+        adapter_exchange.get("artifact_role"),
+        "adapter_exchange.artifact_role",
+    )
+    if not ARTIFACT_ROLE_RE.fullmatch(adapter_exchange_artifact_role):
+        raise ResearchCtlError(
+            "runtime contract adapter_exchange.artifact_role must use "
+            "lower_snake_case"
+        )
+    if adapter_exchange_artifact_role == scientific_record_artifact_role:
+        raise ResearchCtlError(
+            "runtime contract adapter exchange and scientific record roles "
+            "must be distinct"
         )
 
     values = {
@@ -364,6 +412,58 @@ def load_runtime_contract() -> RuntimeContract:
             scientific_record.get("relation_kinds"),
             "scientific_record.relation_kinds",
         ),
+        "adapter_exchange.manifest_fields": _fields(
+            adapter_exchange.get("manifest_fields"),
+            "adapter_exchange.manifest_fields",
+        ),
+        "adapter_exchange.request_fields": _fields(
+            adapter_exchange.get("request_fields"),
+            "adapter_exchange.request_fields",
+        ),
+        "adapter_exchange.payload_fields": _fields(
+            adapter_exchange.get("payload_fields"),
+            "adapter_exchange.payload_fields",
+        ),
+        "adapter_exchange.gate_binding_fields": _fields(
+            adapter_exchange.get("gate_binding_fields"),
+            "adapter_exchange.gate_binding_fields",
+        ),
+        "adapter_exchange.human_authorization_fields": _fields(
+            adapter_exchange.get("human_authorization_fields"),
+            "adapter_exchange.human_authorization_fields",
+        ),
+        "adapter_exchange.retry_policy_fields": _fields(
+            adapter_exchange.get("retry_policy_fields"),
+            "adapter_exchange.retry_policy_fields",
+        ),
+        "adapter_exchange.receipt_fields": _fields(
+            adapter_exchange.get("receipt_fields"),
+            "adapter_exchange.receipt_fields",
+        ),
+        "adapter_exchange.adapter_fields": _fields(
+            adapter_exchange.get("adapter_fields"),
+            "adapter_exchange.adapter_fields",
+        ),
+        "adapter_exchange.verification_fields": _fields(
+            adapter_exchange.get("verification_fields"),
+            "adapter_exchange.verification_fields",
+        ),
+        "adapter_exchange.operation_kinds": _fields(
+            adapter_exchange.get("operation_kinds"),
+            "adapter_exchange.operation_kinds",
+        ),
+        "adapter_exchange.effect_classes": _fields(
+            adapter_exchange.get("effect_classes"),
+            "adapter_exchange.effect_classes",
+        ),
+        "adapter_exchange.retry_modes": _fields(
+            adapter_exchange.get("retry_modes"),
+            "adapter_exchange.retry_modes",
+        ),
+        "adapter_exchange.receipt_statuses": _fields(
+            adapter_exchange.get("receipt_statuses"),
+            "adapter_exchange.receipt_statuses",
+        ),
     }
     for left_label, right_label in (
         ("decision.required_fields", "lifecycle.decision_fields"),
@@ -443,6 +543,54 @@ def load_runtime_contract() -> RuntimeContract:
             "scientific_record.relation_fields",
             {"relation", "target_id"},
         ),
+        (
+            "adapter_exchange.manifest_fields",
+            {"schema_version", "stage", "requests", "receipts"},
+        ),
+        (
+            "adapter_exchange.request_fields",
+            {
+                "request_id", "operation_kind", "created_at", "gate_binding",
+                "payload", "input_artifact_refs", "effect_class",
+                "human_authorization", "retry_policy",
+            },
+        ),
+        (
+            "adapter_exchange.payload_fields",
+            {"artifact_ref", "locator"},
+        ),
+        (
+            "adapter_exchange.gate_binding_fields",
+            {"gate_ref", "gate_decision_id", "artifact_refs"},
+        ),
+        (
+            "adapter_exchange.human_authorization_fields",
+            {"authorization_id", "actor", "authorized_at", "scope"},
+        ),
+        (
+            "adapter_exchange.retry_policy_fields",
+            {"mode", "max_attempts", "idempotency_key"},
+        ),
+        (
+            "adapter_exchange.receipt_fields",
+            {
+                "receipt_id", "request_id", "request_hash", "attempt_id",
+                "retry_of_attempt_id", "supersedes", "adapter", "status",
+                "observed_at", "external_id", "output_artifact_refs",
+                "log_artifact_refs", "message",
+            },
+        ),
+        (
+            "adapter_exchange.adapter_fields",
+            {"adapter_id", "adapter_version", "protocol_version"},
+        ),
+        (
+            "adapter_exchange.verification_fields",
+            {
+                "schema_version", "verification", "verified_at", "request_hash",
+                "attempt_id", "retry_of_attempt_id", "request",
+            },
+        ),
         ("lifecycle.statuses", {"active", "terminated", "completed"}),
         ("lifecycle.actions", {"terminate", "complete", "reopen"}),
         ("activation.actions", {"enable", "disable"}),
@@ -451,6 +599,28 @@ def load_runtime_contract() -> RuntimeContract:
         (
             "stage_transition.trigger_prefixes",
             {"checkpoint", "gate-approve", "gate-reopen"},
+        ),
+        (
+            "adapter_exchange.operation_kinds",
+            {
+                "evidence_retrieval", "experiment_execution", "result_import",
+                "paper_production", "external_release",
+            },
+        ),
+        (
+            "adapter_exchange.effect_classes",
+            {
+                "low_risk", "costly_compute", "destructive",
+                "safety_relevant", "external_release",
+            },
+        ),
+        (
+            "adapter_exchange.retry_modes",
+            {"never", "idempotent", "reconcile_before_retry"},
+        ),
+        (
+            "adapter_exchange.receipt_statuses",
+            {"accepted", "running", "succeeded", "failed", "cancelled", "unknown"},
         ),
     ):
         _require_runtime_enum(values[label], expected, label)
@@ -557,5 +727,49 @@ def load_runtime_contract() -> RuntimeContract:
         scientific_record_relation_signatures=(
             scientific_record_relation_signatures
         ),
+        adapter_exchange_manifest_schema_version=(
+            adapter_exchange_manifest_schema_version
+        ),
+        adapter_exchange_protocol_version=adapter_exchange_protocol_version,
+        adapter_exchange_artifact_role=adapter_exchange_artifact_role,
+        adapter_exchange_manifest_fields=values[
+            "adapter_exchange.manifest_fields"
+        ],
+        adapter_exchange_request_fields=values[
+            "adapter_exchange.request_fields"
+        ],
+        adapter_exchange_payload_fields=values[
+            "adapter_exchange.payload_fields"
+        ],
+        adapter_exchange_gate_binding_fields=values[
+            "adapter_exchange.gate_binding_fields"
+        ],
+        adapter_exchange_human_authorization_fields=values[
+            "adapter_exchange.human_authorization_fields"
+        ],
+        adapter_exchange_retry_policy_fields=values[
+            "adapter_exchange.retry_policy_fields"
+        ],
+        adapter_exchange_receipt_fields=values[
+            "adapter_exchange.receipt_fields"
+        ],
+        adapter_exchange_adapter_fields=values[
+            "adapter_exchange.adapter_fields"
+        ],
+        adapter_exchange_verification_fields=values[
+            "adapter_exchange.verification_fields"
+        ],
+        adapter_exchange_operation_kinds=values[
+            "adapter_exchange.operation_kinds"
+        ],
+        adapter_exchange_effect_classes=values[
+            "adapter_exchange.effect_classes"
+        ],
+        adapter_exchange_retry_modes=values[
+            "adapter_exchange.retry_modes"
+        ],
+        adapter_exchange_receipt_statuses=values[
+            "adapter_exchange.receipt_statuses"
+        ],
         raw=raw,
     )

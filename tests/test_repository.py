@@ -49,6 +49,15 @@ def renamed_semantic_policy() -> dict[str, object]:
                 "initial_submission": "first_round",
                 "revision_rebuttal": "review_round",
             }[requirement["target"]]
+    release_refs = candidate["adapter_authority"]["operation_kinds"][
+        "external_release"
+    ]["required_gate_refs"]
+    for gate_ref in release_refs:
+        gate_ref["gate"] = "external_release"
+        gate_ref["target"] = {
+            "initial_submission": "first_round",
+            "revision_rebuttal": "review_round",
+        }[gate_ref["target"]]
 
     claim = candidate["gates"]["claim_freeze"]
     modes = claim["approval_modes"]
@@ -395,6 +404,21 @@ class RepositoryContractTest(unittest.TestCase):
                 "source_kinds"
             ] = ["paragraph"]
 
+        def adapter_exchange_contract_drops_request_field(
+            contract: dict[str, object]
+        ) -> None:
+            contract["adapter_exchange"]["request_fields"].remove("payload")
+
+        def adapter_exchange_contract_allows_blind_retry(
+            contract: dict[str, object]
+        ) -> None:
+            contract["adapter_exchange"]["retry_modes"] = ["always"]
+
+        def adapter_exchange_contract_drops_unknown_status(
+            contract: dict[str, object]
+        ) -> None:
+            contract["adapter_exchange"]["receipt_statuses"].remove("unknown")
+
         mutations = (
             unsupported_version,
             blank_state_schema,
@@ -422,6 +446,9 @@ class RepositoryContractTest(unittest.TestCase):
             scientific_record_contract_renames_field,
             scientific_record_contract_drops_relation_signature,
             scientific_record_contract_uses_unknown_endpoint_kind,
+            adapter_exchange_contract_drops_request_field,
+            adapter_exchange_contract_allows_blind_retry,
+            adapter_exchange_contract_drops_unknown_status,
         )
         with tempfile.TemporaryDirectory() as directory:
             runtime_path = Path(directory) / "runtime-contract.json"
@@ -596,6 +623,51 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("artifact register record_manifest", readme)
         self.assertIn("inspect_record_manifests", records_source)
 
+    def test_adapter_exchange_is_an_audited_artifact_not_operation_state(self) -> None:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+        policy = json.loads(
+            (ROOT / "skills/research/references/policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        state_template = json.loads(
+            (ROOT / "skills/research/assets/state.template.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        adapter_source = (
+            ROOT / "scripts/researchctl_core/adapters.py"
+        ).read_text(encoding="utf-8")
+        skill = (ROOT / "skills/research/SKILL.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        adr = (ROOT / "decisions/0004-adapter-authority-exchange.md").read_text(
+            encoding="utf-8"
+        )
+
+        exchange = contract["adapter_exchange"]
+        self.assertEqual(exchange["artifact_role"], "adapter_exchange")
+        self.assertEqual(exchange["receipt_statuses"][-1], "unknown")
+        self.assertEqual(
+            set(exchange["retry_modes"]),
+            {"never", "idempotent", "reconcile_before_retry"},
+        )
+        self.assertEqual(
+            set(policy["adapter_authority"]["operation_kinds"]),
+            set(exchange["operation_kinds"]),
+        )
+        self.assertIn(
+            "external_release",
+            policy["adapter_authority"]["human_authorization_effect_classes"],
+        )
+        self.assertNotIn("adapters", state_template)
+        self.assertNotIn("operations", state_template)
+        self.assertIn("inspect_adapter_exchanges", adapter_source)
+        self.assertIn("verify_adapter_dispatch", adapter_source)
+        self.assertIn("adapter verify", skill)
+        self.assertIn("researchctl adapter verify", readme)
+        self.assertIn("Receipt import is not dispatch authorization", adr)
+        self.assertIn("Operation Binding", adr)
+
     def test_policy_semantic_names_drive_release_and_approval_modes(self) -> None:
         candidate = renamed_semantic_policy()
 
@@ -738,6 +810,25 @@ class RepositoryContractTest(unittest.TestCase):
                 "retrospective_revision_import"
             ]["cli_flag"] = "--help"
 
+        def adapter_authority_unknown_operation(policy: dict[str, object]) -> None:
+            policy["adapter_authority"]["operation_kinds"]["shadow_run"] = {
+                "allowed_stages": ["method"],
+                "required_gate_refs": [],
+                "allowed_effect_classes": ["low_risk"],
+            }
+
+        def adapter_authority_unknown_gate(policy: dict[str, object]) -> None:
+            policy["adapter_authority"]["operation_kinds"][
+                "experiment_execution"
+            ]["required_gate_refs"] = [{"gate": "shadow_gate"}]
+
+        def adapter_authority_release_without_human_control(
+            policy: dict[str, object]
+        ) -> None:
+            policy["adapter_authority"][
+                "human_authorization_effect_classes"
+            ].remove("external_release")
+
         mutations = (
             unknown_root_section,
             missing_lifecycle_rule,
@@ -751,6 +842,9 @@ class RepositoryContractTest(unittest.TestCase):
             misleading_artifact_layout_instruction,
             conflicting_retrospective_cli_flag,
             conflicting_retrospective_help_flag,
+            adapter_authority_unknown_operation,
+            adapter_authority_unknown_gate,
+            adapter_authority_release_without_human_control,
         )
         with tempfile.TemporaryDirectory() as directory:
             policy_path = Path(directory) / "policy.json"
@@ -1031,6 +1125,7 @@ class RepositoryContractTest(unittest.TestCase):
             "lifecycle",
             "checkpoint",
             "dashboard",
+            "adapter",
             "doctor",
         ):
             self.assertIn(command, help_result.stdout)
@@ -1050,6 +1145,12 @@ class RepositoryContractTest(unittest.TestCase):
         )
         self.assertEqual(lifecycle.returncode, 0, lifecycle.stderr)
         self.assertIn("--gate", lifecycle.stdout)
+        adapter = self.run_python(
+            "scripts/researchctl.py", "adapter", "verify", "--help"
+        )
+        self.assertEqual(adapter.returncode, 0, adapter.stderr)
+        self.assertIn("--attempt-id", adapter.stdout)
+        self.assertIn("--retry-of-attempt-id", adapter.stdout)
         disable = self.run_python("scripts/researchctl.py", "disable", "--help")
         self.assertIn("--reason", disable.stdout)
 

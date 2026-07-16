@@ -579,10 +579,11 @@ test("experiment launch requires a mechanically trusted method approval", (t) =>
 
   const approved = createProject(t);
   advanceThroughMethod(approved);
-  assert.deepEqual(runHook("PreToolUse", approved.project, {
+  const direct = runHook("PreToolUse", approved.project, {
     tool_name: "Bash",
     tool_input: { command: "sbatch run_experiment.sh" },
-  }), {});
+  });
+  assert.match(denyReason(direct), /direct launch|conforming Adapter/);
 });
 
 test("unbound live-source drift is outside scoped PreTool hashing", (t) => {
@@ -592,10 +593,12 @@ test("unbound live-source drift is outside scoped PreTool hashing", (t) => {
   assert.equal(extra.result.status, 0, extra.result.stderr);
   fs.writeFileSync(extra.source, "unregistered scratch edit\n");
 
-  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+  const direct = runHook("PreToolUse", fixture.project, {
     tool_name: "Bash",
     tool_input: { command: "sbatch run_experiment.sh" },
-  }), {});
+  });
+  assert.match(denyReason(direct), /direct launch|conforming Adapter/);
+  assert.doesNotMatch(denyReason(direct), /untrusted/);
 });
 
 test("forged multi-ID role cardinality fails closed", (t) => {
@@ -873,10 +876,11 @@ test("exact release target controls external send and freezes only the approved 
     fixture, "approve", "release", null, "initial_submission",
   );
   assert.equal(approved.status, 0, approved.stderr);
-  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+  const directInitialSend = runHook("PreToolUse", fixture.project, {
     tool_name: "gmail:send",
     tool_input: { subject: "Initial manuscript submission", body: "Submit the paper." },
-  }), {});
+  });
+  assert.match(denyReason(directInitialSend), /direct send|conforming external Adapter/);
   const wrongTarget = runHook("PreToolUse", fixture.project, {
     tool_name: "gmail:send",
     tool_input: { subject: "Reviewer response", body: "Send the rebuttal." },
@@ -903,10 +907,11 @@ test("exact release target controls external send and freezes only the approved 
     fixture, "approve", "release", null, "revision_rebuttal",
   );
   assert.equal(revisionApproved.status, 0, revisionApproved.stderr);
-  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+  const directRevisionSend = runHook("PreToolUse", fixture.project, {
     tool_name: "gmail:send",
     tool_input: { subject: "Manuscript upload", body: "Upload the paper." },
-  }), {});
+  });
+  assert.match(denyReason(directRevisionSend), /direct send|conforming external Adapter/);
   const frozenRevision = runHook("PreToolUse", fixture.project, {
     tool_name: "apply_patch",
     tool_input: { patch: `*** Update File: ${frozenManuscript}\n` },
@@ -1105,6 +1110,16 @@ test("policy loading rejects malformed authority and exercises environment fallb
       delete claim.approval_modes;
       delete claim.default_approval_mode;
     },
+    (policy) => {
+      delete policy.adapter_authority.operation_kinds.experiment_execution;
+    },
+    (policy) => {
+      policy.adapter_authority.operation_kinds.experiment_execution
+        .required_gate_refs = [{ gate: "shadow_gate" }];
+    },
+    (policy) => {
+      policy.adapter_authority.human_authorization_effect_classes = ["costly_compute"];
+    },
   ];
   for (const mutate of invalidMutations) assert.deepEqual(runPolicy(mutate), {});
 
@@ -1135,6 +1150,10 @@ test("policy loading rejects malformed authority and exercises environment fallb
     (runtime) => {
       runtime.scientific_record.relation_signatures.expresses.source_kinds = ["paragraph"];
     },
+    (runtime) => { delete runtime.adapter_exchange.artifact_role; },
+    (runtime) => { runtime.adapter_exchange.request_fields = ["request_id"]; },
+    (runtime) => { runtime.adapter_exchange.retry_modes = ["always"]; },
+    (runtime) => { runtime.adapter_exchange.receipt_statuses = ["succeeded"]; },
   ];
   for (const mutate of invalidRuntimeMutations) {
     assert.deepEqual(runRuntime(mutate), {});
@@ -1214,6 +1233,7 @@ test("policy loading rejects malformed semantic governance sections", (t) => {
     (policy) => { policy.stages.idea.unchecked = ["ignored"]; },
     (policy) => { policy.gates.idea_freeze.shadow_requirement = ["ignored"]; },
     (policy) => { policy.artifact_layout.shadow_root = ".research/shadow"; },
+    (policy) => { policy.adapter_authority.shadow_authority = []; },
   ]) rejects(mutate);
 });
 
@@ -1305,6 +1325,9 @@ test("Hook accepts a canonical release Gate with one ordered target", (t) => {
   const policy = structuredClone(POLICY);
   policy.workflow_graph.stage_exit_requirements.revision = null;
   delete policy.gates.release.approval_targets.revision_rebuttal;
+  policy.adapter_authority.operation_kinds.external_release.required_gate_refs = [
+    { gate: "release", target: "initial_submission" },
+  ];
 
   const plugin = fs.mkdtempSync(path.join(os.tmpdir(), "research-release-hook-"));
   t.after(() => fs.rmSync(plugin, { recursive: true, force: true }));
@@ -1334,6 +1357,9 @@ test("Hook uses the first ordered release target for an explicit initial submiss
   const policy = structuredClone(POLICY);
   policy.workflow_graph.stage_exit_requirements.revision = null;
   delete policy.gates.release.approval_targets.revision_rebuttal;
+  policy.adapter_authority.operation_kinds.external_release.required_gate_refs = [
+    { gate: "release", target: "initial_submission" },
+  ];
   const state = loadState(fixture);
   delete state.gates.release.targets.revision_rebuttal;
   writeState(fixture, state);
@@ -1349,10 +1375,11 @@ test("Hook uses the first ordered release target for an explicit initial submiss
   fs.writeFileSync(policyPath, `${JSON.stringify(policy)}\n`);
   fs.writeFileSync(runtimePath, `${JSON.stringify(RUNTIME_CONTRACT)}\n`);
 
-  assert.deepEqual(runHook("PreToolUse", fixture.project, {
+  const direct = runHook("PreToolUse", fixture.project, {
     tool_name: "gmail:send",
     tool_input: { subject: "Initial manuscript submission", body: "Submit the paper." },
-  }, { env: { PLUGIN_ROOT: plugin } }), {});
+  }, { env: { PLUGIN_ROOT: plugin } });
+  assert.match(denyReason(direct), /direct send|conforming external Adapter/);
 });
 
 test("reviewer response uses the downstream release target after a paper checkpoint", (t) => {
@@ -1382,6 +1409,10 @@ test("reviewer response uses the downstream release target after a paper checkpo
   };
   policy.workflow_graph.stage_exit_requirements.paper.target = "first_round";
   policy.workflow_graph.stage_exit_requirements.revision.target = "review_round";
+  policy.adapter_authority.operation_kinds.external_release.required_gate_refs = [
+    { gate: "release", target: "first_round" },
+    { gate: "release", target: "review_round" },
+  ];
 
   const state = loadState(fixture);
   const approvedReviewRound = structuredClone(
@@ -1412,7 +1443,10 @@ test("reviewer response uses the downstream release target after a paper checkpo
   const approvedState = loadState(fixture);
   approvedState.gates.release.targets.review_round = approvedReviewRound;
   writeState(fixture, approvedState);
-  assert.deepEqual(reviewerResponse(), {});
+  assert.match(
+    denyReason(reviewerResponse()),
+    /direct send|conforming external Adapter/,
+  );
 });
 
 test("Hook derives the initial release target when validating completion", (t) => {
@@ -1440,6 +1474,10 @@ test("Hook derives the initial release target when validating completion", (t) =
   policy.workflow_graph.stage_exit_requirements.revision = {
     gate: "publication", target: "response_delivery",
   };
+  policy.adapter_authority.operation_kinds.external_release.required_gate_refs = [
+    { gate: "publication", target: "first_delivery" },
+    { gate: "publication", target: "response_delivery" },
+  ];
 
   const state = loadState(fixture);
   const releaseRecord = state.gates.release;

@@ -43,6 +43,8 @@ paper_toolchain:
 
 Declare `bibtex`, `biber`, or `none` and the bibliography files actually used. In `bibliography_provenance`, retain each bibliography source or export tool, retrieval/export time, file hash, citation-key mapping, and content-verification status. Non-LaTeX sources use an equivalent reproducible build and rendered-output contract rather than pretending to be TeX.
 
+When an external builder, renderer, bibliography exporter, or other declared Reference Stack performs the work, persist and verify the operation through the shared `adapter_exchange` contract, then register the attempt's first `accepted` receipt before the external side effect. Register outputs and logs before referencing them from later factual receipts. Provider-reported success does not replace clean-build checks, visual inspection, claim review, or release approval.
+
 ## Map claims before drafting
 
 Assign every central claim and material numerical statement one primary manuscript location. Maintain a claim map entry such as:

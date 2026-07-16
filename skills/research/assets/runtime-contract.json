@@ -170,5 +170,79 @@
         "target_kinds": ["review_concern"]
       }
     }
+  },
+  "adapter_exchange": {
+    "manifest_schema_version": "1.0",
+    "protocol_version": "1.0",
+    "artifact_role": "adapter_exchange",
+    "manifest_fields": ["schema_version", "stage", "requests", "receipts"],
+    "request_fields": [
+      "request_id",
+      "operation_kind",
+      "created_at",
+      "gate_binding",
+      "payload",
+      "input_artifact_refs",
+      "effect_class",
+      "human_authorization",
+      "retry_policy"
+    ],
+    "payload_fields": ["artifact_ref", "locator"],
+    "gate_binding_fields": ["gate_ref", "gate_decision_id", "artifact_refs"],
+    "human_authorization_fields": [
+      "authorization_id",
+      "actor",
+      "authorized_at",
+      "scope"
+    ],
+    "retry_policy_fields": ["mode", "max_attempts", "idempotency_key"],
+    "receipt_fields": [
+      "receipt_id",
+      "request_id",
+      "request_hash",
+      "attempt_id",
+      "retry_of_attempt_id",
+      "supersedes",
+      "adapter",
+      "status",
+      "observed_at",
+      "external_id",
+      "output_artifact_refs",
+      "log_artifact_refs",
+      "message"
+    ],
+    "adapter_fields": ["adapter_id", "adapter_version", "protocol_version"],
+    "verification_fields": [
+      "schema_version",
+      "verification",
+      "verified_at",
+      "request_hash",
+      "attempt_id",
+      "retry_of_attempt_id",
+      "request"
+    ],
+    "operation_kinds": [
+      "evidence_retrieval",
+      "experiment_execution",
+      "result_import",
+      "paper_production",
+      "external_release"
+    ],
+    "effect_classes": [
+      "low_risk",
+      "costly_compute",
+      "destructive",
+      "safety_relevant",
+      "external_release"
+    ],
+    "retry_modes": ["never", "idempotent", "reconcile_before_retry"],
+    "receipt_statuses": [
+      "accepted",
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "unknown"
+    ]
   }
 }

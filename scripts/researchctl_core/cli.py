@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .commands import (
+    cmd_adapter_verify,
     cmd_artifact,
     cmd_checkpoint,
     cmd_doctor,
@@ -160,6 +161,21 @@ def build_parser(policy: Policy) -> argparse.ArgumentParser:
         help="best-effort open the generated dashboard in the default browser",
     )
     subparsers.add_parser("doctor", help="validate project state and pointers")
+    adapter = subparsers.add_parser(
+        "adapter",
+        help="verify one registered adapter request before an external dispatch",
+    )
+    adapter_actions = adapter.add_subparsers(dest="adapter_action", required=True)
+    verify = adapter_actions.add_parser(
+        "verify",
+        help="revalidate exact Gate revisions and retry eligibility without executing",
+    )
+    verify.add_argument("request_id", help="registered adapter request ID")
+    verify.add_argument("--attempt-id", required=True, help="new external attempt ID")
+    verify.add_argument(
+        "--retry-of-attempt-id",
+        help="latest prior attempt ID when verifying a retry",
+    )
     return parser
 
 def dispatch_command(
@@ -185,6 +201,8 @@ def dispatch_command(
         return cmd_dashboard(root, policy, args)
     if args.command == "doctor":
         return cmd_doctor(root, policy, args)
+    if args.command == "adapter":
+        return cmd_adapter_verify(root, policy, args)
     raise ResearchCtlError(f"unsupported command: {args.command}")
 
 def configure_standard_streams() -> None:
@@ -216,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate",
             "lifecycle",
             "checkpoint",
+            "adapter",
         }
         if args.command in mutating_commands:
             if (

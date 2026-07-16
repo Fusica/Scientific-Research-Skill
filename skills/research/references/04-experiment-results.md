@@ -50,6 +50,8 @@ Derive repetitions, uncertainty, effect thresholds, tests, and evaluation protoc
 
 Progress from integrity and smoke checks to baseline parity, the minimal mechanism, and the approved primary comparison. Give each phase an explicit attempt budget, fallback, and stop condition derived from the experiment contract; do not hard-code universal parity or variance thresholds. Add ablations, robustness, generalization, safety, scaling, or efficiency tests only when they resolve a registered claim or risk.
 
+When a declared Reference Stack executes or imports work, persist its operation through the shared `adapter_exchange` contract, verify the registered request for each new attempt, then append and register that attempt's first `accepted` receipt before any side effect. Only after this durable journal exists may the Adapter execute the bound immutable inputs; append later observations as superseding receipts. A receipt complements but never replaces the scientific run registry: retain `unknown` outcomes, reconcile the same attempt before a non-idempotent retry, and make every later scientific inclusion or exclusion judgment in the canonical experiment artifacts.
+
 ## Register every run
 
 Append one immutable run record per attempt, including:

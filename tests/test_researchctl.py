@@ -15,6 +15,146 @@ except ImportError:  # unittest discover -s tests
 
 
 class ResearchCtlV2Test(ResearchProjectTestCase):
+    def artifact_ref(
+        self, role_reference: str, artifact_id: str
+    ) -> dict[str, object]:
+        stage, role = role_reference.split(".", 1)
+        revision = self.artifact_entry(role_reference, artifact_id)[
+            "revisions"
+        ][-1]
+        return {
+            "label": f"artifacts.{stage}.{role}.{artifact_id}",
+            "artifact_id": artifact_id,
+            **revision,
+        }
+
+    def gate_binding(
+        self, gate: str, *, target: str | None = None
+    ) -> dict[str, object]:
+        state = self.load_state()
+        record = state["gates"][gate]
+        if target is not None:
+            record = record["targets"][target]
+        decision = record["history"][-1]
+        gate_ref: dict[str, object] = {"gate": gate}
+        if target is not None:
+            gate_ref["target"] = target
+        return {
+            "gate_ref": gate_ref,
+            "gate_decision_id": decision["decision_id"],
+            "artifact_refs": decision["artifact_refs"],
+        }
+
+    def adapter_request(
+        self,
+        *,
+        request_id: str,
+        operation_kind: str,
+        payload_ref: dict[str, object],
+        gate_binding: dict[str, object] | None,
+        effect_class: str = "low_risk",
+        human_authorization: dict[str, object] | None = None,
+        retry_mode: str = "reconcile_before_retry",
+        max_attempts: int = 2,
+    ) -> dict[str, object]:
+        timestamp = self.load_state()["updated_at"]
+        if human_authorization is None and effect_class != "low_risk":
+            human_authorization = {
+                "authorization_id": f"AUTH-{request_id}",
+                "actor": "test-researcher",
+                "authorized_at": timestamp,
+                "scope": f"Authorize exactly {request_id}.",
+            }
+        input_refs = [payload_ref]
+        if isinstance(gate_binding, dict):
+            for reference in gate_binding.get("artifact_refs", []):
+                if reference not in input_refs:
+                    input_refs.append(reference)
+        return {
+            "request_id": request_id,
+            "operation_kind": operation_kind,
+            "created_at": timestamp,
+            "gate_binding": gate_binding,
+            "payload": {
+                "artifact_ref": payload_ref,
+                "locator": f"#{request_id.lower()}",
+            },
+            "input_artifact_refs": input_refs,
+            "effect_class": effect_class,
+            "human_authorization": human_authorization,
+            "retry_policy": {
+                "mode": retry_mode,
+                "max_attempts": max_attempts,
+                "idempotency_key": (
+                    None if retry_mode == "never" else f"IDEMP-{request_id}"
+                ),
+            },
+        }
+
+    def adapter_receipt(
+        self,
+        *,
+        receipt_id: str,
+        request: dict[str, object],
+        request_hash: str,
+        attempt_id: str,
+        status: str,
+        retry_of_attempt_id: str | None = None,
+        supersedes: str | None = None,
+        external_id: str | None = "job-001",
+        message: str | None = None,
+        observed_at: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "receipt_id": receipt_id,
+            "request_id": request["request_id"],
+            "request_hash": request_hash,
+            "attempt_id": attempt_id,
+            "retry_of_attempt_id": retry_of_attempt_id,
+            "supersedes": supersedes,
+            "adapter": {
+                "adapter_id": "fake-async",
+                "adapter_version": "1.0.0",
+                "protocol_version": "1.0",
+            },
+            "status": status,
+            "observed_at": observed_at or self.load_state()["updated_at"],
+            "external_id": external_id,
+            "output_artifact_refs": [],
+            "log_artifact_refs": [],
+            "message": message or f"Adapter reported {status}.",
+        }
+
+    def adapter_manifest(
+        self,
+        *,
+        stage: str,
+        requests: list[dict[str, object]],
+        receipts: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "1.0",
+            "stage": stage,
+            "requests": requests,
+            "receipts": receipts or [],
+        }
+
+    def write_adapter_manifest(
+        self, manifest: dict[str, object], *, stage: str
+    ) -> tuple[Path, subprocess.CompletedProcess[str]]:
+        path = self.project / "work" / stage / "adapter-exchange.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, result = self.register(
+            f"{stage}.adapter_exchange",
+            f"{stage.upper()}-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        return path, result
+
     def record_manifest(
         self,
         *,
@@ -68,6 +208,809 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
         self.assertIn("state already exists; left unchanged", again.stdout)
         exclude = (self.project / ".git/info/exclude").read_text(encoding="utf-8")
         self.assertEqual(exclude.count(".research/"), 1)
+
+    def test_adapter_request_is_registered_then_verified_without_adapter_state(
+        self,
+    ) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request",
+            "EXPERIMENT-REQUEST-001",
+            content='{"command":["python3","train.py"]}\n',
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-001",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+            effect_class="costly_compute",
+        )
+        _path, exchange = self.write_adapter_manifest(
+            self.adapter_manifest(
+                stage="experiment_results", requests=[request]
+            ),
+            stage="experiment_results",
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            "REQUEST-EXPERIMENT-001",
+            "--attempt-id",
+            "ATTEMPT-EXPERIMENT-001",
+        )
+
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        envelope = json.loads(verified.stdout)
+        self.assertEqual(envelope["verification"], "accepted")
+        self.assertEqual(envelope["request"]["request_id"], request["request_id"])
+        self.assertRegex(envelope["request_hash"], r"^sha256:[0-9a-f]{64}$")
+        state = self.load_state()
+        self.assertNotIn("adapters", state)
+        self.assertNotIn("operations", state)
+        self.assertIn(
+            "adapter_exchange", state["artifacts"]["experiment_results"]
+        )
+
+    def test_stale_gate_blocks_dispatch_but_not_late_unknown_receipt(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request",
+            "EXPERIMENT-REQUEST-STALE",
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-STALE",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        first_verify = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-STALE-001",
+        )
+        self.assertEqual(first_verify.returncode, 0, first_verify.stderr)
+        request_hash = json.loads(first_verify.stdout)["request_hash"]
+
+        accepted = self.adapter_receipt(
+            receipt_id="RECEIPT-STALE-ACCEPTED",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-STALE-001",
+            status="accepted",
+            message="Attempt journal persisted before the external side effect.",
+        )
+        manifest["receipts"] = [accepted]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, journaled = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(journaled.returncode, 0, journaled.stderr)
+
+        reopened = self.gate("reopen", "method_experiment_approval")
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        blocked = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-STALE-002",
+        )
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("current approved Gate binding", blocked.stderr)
+
+        manifest["receipts"].append(
+            self.adapter_receipt(
+                receipt_id="RECEIPT-STALE-UNKNOWN",
+                request=request,
+                request_hash=request_hash,
+                attempt_id="ATTEMPT-STALE-001",
+                status="unknown",
+                supersedes="RECEIPT-STALE-ACCEPTED",
+                message="Dispatch outcome is unknown after transport loss.",
+            )
+        )
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, imported = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_unknown_reconcile_policy_blocks_blind_retry(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-UNKNOWN"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-UNKNOWN",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-UNKNOWN-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        request_hash = json.loads(verified.stdout)["request_hash"]
+        manifest["receipts"] = [
+            self.adapter_receipt(
+                receipt_id="RECEIPT-UNKNOWN-ACCEPTED",
+                request=request,
+                request_hash=request_hash,
+                attempt_id="ATTEMPT-UNKNOWN-001",
+                status="accepted",
+                external_id="job-unknown",
+                message="Attempt journal persisted before the external side effect.",
+            )
+        ]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, journaled = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(journaled.returncode, 0, journaled.stderr)
+        manifest["receipts"].append(
+            self.adapter_receipt(
+                receipt_id="RECEIPT-UNKNOWN-OBSERVED",
+                request=request,
+                request_hash=request_hash,
+                attempt_id="ATTEMPT-UNKNOWN-001",
+                status="unknown",
+                supersedes="RECEIPT-UNKNOWN-ACCEPTED",
+                external_id="job-unknown",
+                message="Reconcile this attempt before any retry.",
+            )
+        )
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, imported = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+
+        retry = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-UNKNOWN-002",
+            "--retry-of-attempt-id",
+            "ATTEMPT-UNKNOWN-001",
+        )
+
+        self.assertEqual(retry.returncode, 2)
+        self.assertIn("reconcile", retry.stderr)
+
+    def test_dispatch_journal_requires_current_gate_before_side_effect(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-JOURNAL"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-JOURNAL",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-JOURNAL-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        request_hash = json.loads(verified.stdout)["request_hash"]
+        self.assertEqual(
+            self.gate("reopen", "method_experiment_approval").returncode, 0
+        )
+        state_before = self.state_path.read_bytes()
+        manifest["receipts"] = [
+            self.adapter_receipt(
+                receipt_id="RECEIPT-JOURNAL-ACCEPTED",
+                request=request,
+                request_hash=request_hash,
+                attempt_id="ATTEMPT-JOURNAL-001",
+                status="accepted",
+            )
+        ]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        _identifier, _path, rejected = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("current approved Gate binding", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_dispatch_journal_is_durable_before_later_attempt_receipts(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-ORDER"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-ORDER",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-ORDER-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        request_hash = json.loads(verified.stdout)["request_hash"]
+        accepted = self.adapter_receipt(
+            receipt_id="RECEIPT-ORDER-ACCEPTED",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-ORDER-001",
+            status="accepted",
+        )
+        succeeded = self.adapter_receipt(
+            receipt_id="RECEIPT-ORDER-SUCCEEDED-EARLY",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-ORDER-001",
+            status="succeeded",
+            supersedes="RECEIPT-ORDER-ACCEPTED",
+        )
+        manifest["receipts"] = [accepted, succeeded]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        state_before = self.state_path.read_bytes()
+
+        _identifier, _path, combined = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+
+        self.assertEqual(combined.returncode, 2)
+        self.assertIn("before appending any later observation", combined.stderr)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+        manifest["receipts"] = [accepted]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, journaled = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(journaled.returncode, 0, journaled.stderr)
+        succeeded = self.adapter_receipt(
+            receipt_id="RECEIPT-ORDER-SUCCEEDED",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-ORDER-001",
+            status="succeeded",
+            supersedes="RECEIPT-ORDER-ACCEPTED",
+        )
+        manifest["receipts"].append(succeeded)
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, completed = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_doctor_replays_historical_dispatch_journal_authority(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-AUDIT"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-AUDIT",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-AUDIT-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        manifest["receipts"] = [
+            self.adapter_receipt(
+                receipt_id="RECEIPT-AUDIT-ACCEPTED",
+                request=request,
+                request_hash=json.loads(verified.stdout)["request_hash"],
+                attempt_id="ATTEMPT-AUDIT-001",
+                status="accepted",
+            )
+        ]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, journaled = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(journaled.returncode, 0, journaled.stderr)
+        self.assertEqual(
+            self.gate("reopen", "method_experiment_approval").returncode, 0
+        )
+
+        state = self.load_state()
+        revisions = state["artifacts"]["experiment_results"][
+            "adapter_exchange"
+        ]["EXPERIMENT_RESULTS-ADAPTER-EXCHANGE"]["revisions"]
+        revisions[1]["registered_at"] = state["updated_at"]
+        self.write_state(state)
+
+        doctor = self.run_ctl("doctor")
+
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("when first registered", doctor.stdout)
+
+    def test_doctor_rejects_historical_same_revision_dispatch_and_result(
+        self,
+    ) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-FORGED"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-FORGED",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-FORGED-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        request_hash = json.loads(verified.stdout)["request_hash"]
+        accepted = self.adapter_receipt(
+            receipt_id="RECEIPT-FORGED-ACCEPTED",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-FORGED-001",
+            status="accepted",
+        )
+        manifest["receipts"] = [accepted]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, journaled = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(journaled.returncode, 0, journaled.stderr)
+
+        manifest["receipts"].append(
+            self.adapter_receipt(
+                receipt_id="RECEIPT-FORGED-SUCCEEDED",
+                request=request,
+                request_hash=request_hash,
+                attempt_id="ATTEMPT-FORGED-001",
+                status="succeeded",
+                supersedes="RECEIPT-FORGED-ACCEPTED",
+            )
+        )
+        forged = (
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        ).encode()
+        state = self.load_state()
+        revisions = state["artifacts"]["experiment_results"][
+            "adapter_exchange"
+        ]["EXPERIMENT_RESULTS-ADAPTER-EXCHANGE"]["revisions"]
+        journal_revision = revisions[1]
+        path.write_bytes(forged)
+        (self.project / journal_revision["snapshot_path"]).write_bytes(forged)
+        journal_revision["content_hash"] = (
+            "sha256:" + hashlib.sha256(forged).hexdigest()
+        )
+        journal_revision["size_bytes"] = len(forged)
+        self.write_state(state)
+
+        doctor = self.run_ctl("doctor")
+
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("before appending any later observation", doctor.stdout)
+
+    def test_late_nonconforming_fact_is_preserved_without_dispatch_authority(
+        self,
+    ) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-LATE"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-LATE",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-LATE-001",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(
+            self.gate("reopen", "method_experiment_approval").returncode, 0
+        )
+        manifest["receipts"] = [
+            self.adapter_receipt(
+                receipt_id="RECEIPT-LATE-UNKNOWN",
+                request=request,
+                request_hash=json.loads(verified.stdout)["request_hash"],
+                attempt_id="ATTEMPT-LATE-001",
+                status="unknown",
+                message="Observed off-contract work after losing transport state.",
+            )
+        ]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        _identifier, _path, imported = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        self.assertIn("nonconforming fact import", imported.stderr)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertIn("nonconforming fact import", doctor.stdout)
+
+    def test_gate_artifacts_are_operational_inputs_and_release_payload_is_exact(
+        self,
+    ) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-INPUTS"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-INPUTS",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+        )
+        request["input_artifact_refs"] = [request["payload"]["artifact_ref"]]
+        _path, rejected_inputs = self.write_adapter_manifest(
+            self.adapter_manifest(stage="experiment_results", requests=[request]),
+            stage="experiment_results",
+        )
+        self.assertEqual(rejected_inputs.returncode, 2)
+        self.assertIn("must include approved Gate", rejected_inputs.stderr)
+
+        self.assertEqual(self.approve_gate("claim_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate(
+                "release", release_target="initial_submission"
+            ).returncode,
+            0,
+        )
+        unrelated_id, _unrelated, unrelated_registered = self.register(
+            "revision.release_request", "UNAPPROVED-RELEASE-PAYLOAD"
+        )
+        self.assertEqual(
+            unrelated_registered.returncode, 0, unrelated_registered.stderr
+        )
+        release_binding = self.gate_binding(
+            "release", target="initial_submission"
+        )
+        release_request = self.adapter_request(
+            request_id="REQUEST-RELEASE-UNBOUND",
+            operation_kind="external_release",
+            payload_ref=self.artifact_ref(
+                "revision.release_request", unrelated_id
+            ),
+            gate_binding=release_binding,
+            effect_class="external_release",
+        )
+        _path, rejected_payload = self.write_adapter_manifest(
+            self.adapter_manifest(stage="revision", requests=[release_request]),
+            stage="revision",
+        )
+        self.assertEqual(rejected_payload.returncode, 2)
+        self.assertIn("approved release package", rejected_payload.stderr)
+
+        exact_payload_request = self.adapter_request(
+            request_id="REQUEST-RELEASE-EXTRA-INPUT",
+            operation_kind="external_release",
+            payload_ref=release_binding["artifact_refs"][0],
+            gate_binding=release_binding,
+            effect_class="external_release",
+        )
+        exact_payload_request["input_artifact_refs"].append(
+            self.artifact_ref("revision.release_request", unrelated_id)
+        )
+        _path, rejected_extra = self.write_adapter_manifest(
+            self.adapter_manifest(
+                stage="revision", requests=[exact_payload_request]
+            ),
+            stage="revision",
+        )
+        self.assertEqual(rejected_extra.returncode, 2)
+        self.assertIn("without extra artifacts", rejected_extra.stderr)
+
+    def test_adapter_exchange_is_append_only_and_writing_uses_claim_gate(self) -> None:
+        self.advance_through_claim_freeze()
+        payload_id, _payload, registered = self.register(
+            "paper.build_request", "PAPER-BUILD-REQUEST-001"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-PAPER-001",
+            operation_kind="paper_production",
+            payload_ref=self.artifact_ref("paper.build_request", payload_id),
+            gate_binding=self.gate_binding("claim_freeze"),
+        )
+        wrong_request = json.loads(json.dumps(request))
+        wrong_request["gate_binding"] = self.gate_binding(
+            "method_experiment_approval"
+        )
+        _wrong_path, wrong_gate = self.write_adapter_manifest(
+            self.adapter_manifest(stage="paper", requests=[wrong_request]),
+            stage="paper",
+        )
+        self.assertEqual(wrong_gate.returncode, 2)
+        self.assertIn("policy-required GateRef", wrong_gate.stderr)
+
+        manifest = self.adapter_manifest(stage="paper", requests=[request])
+        path, exchange = self.write_adapter_manifest(manifest, stage="paper")
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+
+        request["payload"]["locator"] = "#silently-rewritten"
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        _identifier, _path, rewritten = self.register(
+            "paper.adapter_exchange", "PAPER-ADAPTER-EXCHANGE", path=path
+        )
+
+        self.assertEqual(rewritten.returncode, 2)
+        self.assertIn("append-only", rewritten.stderr)
+
+    def test_external_release_requires_action_specific_human_authorization(self) -> None:
+        self.advance_through_claim_freeze()
+        released = self.approve_gate(
+            "release", release_target="initial_submission"
+        )
+        self.assertEqual(released.returncode, 0, released.stderr)
+        release_binding = self.gate_binding(
+            "release", target="initial_submission"
+        )
+        request = self.adapter_request(
+            request_id="REQUEST-RELEASE-001",
+            operation_kind="external_release",
+            payload_ref=release_binding["artifact_refs"][0],
+            gate_binding=release_binding,
+            effect_class="external_release",
+        )
+        request["human_authorization"] = None
+        _path, rejected = self.write_adapter_manifest(
+            self.adapter_manifest(stage="revision", requests=[request]),
+            stage="revision",
+        )
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("human_authorization", rejected.stderr)
+
+    def test_adapter_timestamps_cannot_postdate_first_registration(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request", "EXPERIMENT-REQUEST-TIME"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        binding = self.gate_binding("method_experiment_approval")
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-FUTURE-CREATED",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=binding,
+        )
+        request["created_at"] = "2999-01-01T00:00:00Z"
+        state_before = self.state_path.read_bytes()
+        _path, future_created = self.write_adapter_manifest(
+            self.adapter_manifest(stage="experiment_results", requests=[request]),
+            stage="experiment_results",
+        )
+        self.assertEqual(future_created.returncode, 2)
+        self.assertIn("created_at cannot follow", future_created.stderr)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-FUTURE-AUTH",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=binding,
+            effect_class="costly_compute",
+        )
+        request["human_authorization"]["authorized_at"] = "2999-01-01T00:00:00Z"
+        _path, future_authorized = self.write_adapter_manifest(
+            self.adapter_manifest(stage="experiment_results", requests=[request]),
+            stage="experiment_results",
+        )
+        self.assertEqual(future_authorized.returncode, 2)
+        self.assertIn("authorized_at cannot follow", future_authorized.stderr)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-FUTURE-RECEIPT",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=binding,
+        )
+        manifest = self.adapter_manifest(
+            stage="experiment_results", requests=[request]
+        )
+        path, exchange = self.write_adapter_manifest(
+            manifest, stage="experiment_results"
+        )
+        self.assertEqual(exchange.returncode, 0, exchange.stderr)
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-FUTURE-RECEIPT",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        manifest["receipts"] = [
+            self.adapter_receipt(
+                receipt_id="RECEIPT-FUTURE-ACCEPTED",
+                request=request,
+                request_hash=json.loads(verified.stdout)["request_hash"],
+                attempt_id="ATTEMPT-FUTURE-RECEIPT",
+                status="accepted",
+                observed_at="2999-01-01T00:00:00Z",
+            )
+        ]
+        path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        state_before_receipt = self.state_path.read_bytes()
+        _identifier, _path, future_observed = self.register(
+            "experiment_results.adapter_exchange",
+            "EXPERIMENT_RESULTS-ADAPTER-EXCHANGE",
+            path=path,
+        )
+        self.assertEqual(future_observed.returncode, 2)
+        self.assertIn("observed_at cannot follow", future_observed.stderr)
+        self.assertEqual(self.state_path.read_bytes(), state_before_receipt)
 
     def test_record_manifest_binds_records_without_creating_second_state(self) -> None:
         source_id, _source, registered_source = self.register(

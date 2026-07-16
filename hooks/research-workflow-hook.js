@@ -341,7 +341,7 @@ function loadRuntimeContract() {
   if (!sameFieldSet(runtime, [
     "contract_version", "state_schema_version", "state", "decision", "lifecycle",
     "activation", "gate", "artifact", "checkpoint", "stage_transition",
-    "scientific_record",
+    "scientific_record", "adapter_exchange",
   ]) || runtime.contract_version !== "2.0"
     || typeof runtime.state_schema_version !== "string"
     || !runtime.state_schema_version.trim()) return null;
@@ -396,6 +396,27 @@ function loadRuntimeContract() {
         (kind) => !scientificRecord.record_kinds.includes(kind),
       )) return null;
   }
+  const adapterExchange = runtime.adapter_exchange;
+  const adapterExchangeLists = [
+    "manifest_fields", "request_fields", "payload_fields", "gate_binding_fields",
+    "human_authorization_fields", "retry_policy_fields", "receipt_fields",
+    "adapter_fields", "verification_fields", "operation_kinds", "effect_classes",
+    "retry_modes", "receipt_statuses",
+  ];
+  if (!sameFieldSet(adapterExchange, [
+    "manifest_schema_version", "protocol_version", "artifact_role",
+    ...adapterExchangeLists,
+  ])
+    || typeof adapterExchange.manifest_schema_version !== "string"
+    || !adapterExchange.manifest_schema_version.trim()
+    || typeof adapterExchange.protocol_version !== "string"
+    || !adapterExchange.protocol_version.trim()
+    || typeof adapterExchange.artifact_role !== "string"
+    || !/^[a-z][a-z0-9_]*$/.test(adapterExchange.artifact_role)
+    || adapterExchange.artifact_role === scientificRecord.artifact_role
+    || adapterExchangeLists.some(
+      (field) => !uniqueStringList(adapterExchange[field]),
+    )) return null;
   const disjoint = (left, right) => !left.some((field) => right.includes(field));
   for (const [left, right] of [
     [runtime.decision.required_fields, runtime.lifecycle.decision_fields],
@@ -452,6 +473,35 @@ function loadRuntimeContract() {
       "artifact_role", "artifact_id", "revision", "locator",
     ]],
     [runtime.scientific_record.relation_fields, ["relation", "target_id"]],
+    [runtime.adapter_exchange.manifest_fields, [
+      "schema_version", "stage", "requests", "receipts",
+    ]],
+    [runtime.adapter_exchange.request_fields, [
+      "request_id", "operation_kind", "created_at", "gate_binding", "payload",
+      "input_artifact_refs", "effect_class", "human_authorization", "retry_policy",
+    ]],
+    [runtime.adapter_exchange.payload_fields, ["artifact_ref", "locator"]],
+    [runtime.adapter_exchange.gate_binding_fields, [
+      "gate_ref", "gate_decision_id", "artifact_refs",
+    ]],
+    [runtime.adapter_exchange.human_authorization_fields, [
+      "authorization_id", "actor", "authorized_at", "scope",
+    ]],
+    [runtime.adapter_exchange.retry_policy_fields, [
+      "mode", "max_attempts", "idempotency_key",
+    ]],
+    [runtime.adapter_exchange.receipt_fields, [
+      "receipt_id", "request_id", "request_hash", "attempt_id",
+      "retry_of_attempt_id", "supersedes", "adapter", "status", "observed_at",
+      "external_id", "output_artifact_refs", "log_artifact_refs", "message",
+    ]],
+    [runtime.adapter_exchange.adapter_fields, [
+      "adapter_id", "adapter_version", "protocol_version",
+    ]],
+    [runtime.adapter_exchange.verification_fields, [
+      "schema_version", "verification", "verified_at", "request_hash", "attempt_id",
+      "retry_of_attempt_id", "request",
+    ]],
   ];
   if (fixedV2Fields.some(([value, expected]) => !sameStringSet(value, expected))) {
     return null;
@@ -481,6 +531,20 @@ function loadRuntimeContract() {
     [runtime.stage_transition.trigger_prefixes, [
       "checkpoint", "gate-approve", "gate-reopen",
     ]],
+    [runtime.adapter_exchange.operation_kinds, [
+      "evidence_retrieval", "experiment_execution", "result_import",
+      "paper_production", "external_release",
+    ]],
+    [runtime.adapter_exchange.effect_classes, [
+      "low_risk", "costly_compute", "destructive", "safety_relevant",
+      "external_release",
+    ]],
+    [runtime.adapter_exchange.retry_modes, [
+      "never", "idempotent", "reconcile_before_retry",
+    ]],
+    [runtime.adapter_exchange.receipt_statuses, [
+      "accepted", "running", "succeeded", "failed", "cancelled", "unknown",
+    ]],
   ]) {
     if (!sameStringSet(value, expected)) return null;
   }
@@ -499,7 +563,7 @@ function loadPolicy(runtime) {
   if (!sameFieldSet(policy, [
     "schema_version", "workflow_version", "workflow_graph",
     "artifact_role_cardinality_default", "artifact_layout", "review_language",
-    "workspace_lifecycle", "authority_boundary", "gates", "stages",
+    "workspace_lifecycle", "authority_boundary", "adapter_authority", "gates", "stages",
     "global_prohibited_actions", "semantic_audit",
   ]) || !plainObject(runtime)
     || policy.schema_version !== runtime.state_schema_version
@@ -667,6 +731,49 @@ function loadPolicy(runtime) {
         || !spec.required_artifact_roles.includes(selection))) return null;
   }
   if (retrospectiveModeCount !== 1) return null;
+  const adapterAuthority = policy.adapter_authority;
+  if (!sameFieldSet(adapterAuthority, [
+    "human_authorization_effect_classes", "operation_kinds",
+  ])
+    || !sameStringSet(
+      adapterAuthority.human_authorization_effect_classes,
+      runtime.adapter_exchange.effect_classes.filter((effect) => effect !== "low_risk"),
+    )
+    || !sameFieldSet(
+      adapterAuthority.operation_kinds,
+      runtime.adapter_exchange.operation_kinds,
+    )) return null;
+  for (const operationKind of runtime.adapter_exchange.operation_kinds) {
+    const operation = adapterAuthority.operation_kinds[operationKind];
+    if (!sameFieldSet(operation, [
+      "allowed_stages", "required_gate_refs", "allowed_effect_classes",
+    ])
+      || !uniqueStringList(operation.allowed_stages)
+      || operation.allowed_stages.some((stage) => !stageIds.includes(stage))
+      || !uniqueStringList(operation.allowed_effect_classes)
+      || operation.allowed_effect_classes.some(
+        (effect) => !runtime.adapter_exchange.effect_classes.includes(effect),
+      )
+      || !Array.isArray(operation.required_gate_refs)) return null;
+    const operationRefKeys = [];
+    for (const gateRef of operation.required_gate_refs) {
+      if (!plainObject(gateRef)
+        || !(sameFieldSet(gateRef, ["gate"]) || sameFieldSet(gateRef, ["gate", "target"]))
+        || typeof gateRef.gate !== "string" || !gateRef.gate.trim()
+        || (Object.prototype.hasOwnProperty.call(gateRef, "target")
+          && (typeof gateRef.target !== "string" || !gateRef.target.trim()))) return null;
+      const key = `${gateRef.gate}\0${gateRef.target ?? ""}`;
+      if (!seenRefs.has(key) || operationRefKeys.includes(key)) return null;
+      operationRefKeys.push(key);
+    }
+    if (operation.allowed_effect_classes.some((effect) => effect !== "low_risk")
+      && !operationRefKeys.length) return null;
+    if (operation.allowed_effect_classes.includes("external_release")
+      && (!sameStringSet(operation.allowed_effect_classes, ["external_release"])
+        || operation.required_gate_refs.some(
+          (gateRef) => !Object.prototype.hasOwnProperty.call(gateRef, "target"),
+        ))) return null;
+  }
   for (const source of stageIds) {
     const destinations = new Set();
     for (const candidate of graph.stage_transitions[source]) {
@@ -1466,7 +1573,7 @@ function dangerousShellReason(command) {
 
 function isResearchCtlCommand(command) {
   if (!/(?:^|[\s"'/])researchctl(?:\.py)?(?:["'\s]|$)/i.test(command)) return false;
-  return /\b(?:init|status|enable|disable|artifact|gate|lifecycle|checkpoint|dashboard|doctor)\b/i.test(command);
+  return /\b(?:init|status|enable|disable|artifact|gate|lifecycle|checkpoint|dashboard|adapter|doctor)\b/i.test(command);
 }
 
 function researchCtlArguments(segment) {
@@ -1941,6 +2048,10 @@ function preToolUse(context, input) {
     return deny(`This is an explicit experiment, training, cluster, or hardware launch, but ${experimentGate || "the policy experiment Gate"} is not mechanically trusted.${untrustedSuffix(experimentGate)} Prepare the method and experiment contract, then record human approval through researchctl.`);
   }
 
+  if (launchesExperiment) {
+    return deny("The experiment Gate is mechanically trusted, but a direct launch is not a conforming Adapter dispatch. Persist the Adapter Request, run researchctl adapter verify, register the attempt's first accepted receipt as a durable pre-side-effect journal, and let the external Adapter execute the bound immutable inputs.");
+  }
+
   if (mutatesManuscript && !gateTrusted(manuscriptGate)) {
     return deny(`This tool call mechanically targets a manuscript or rebuttal artifact before ${manuscriptGate || "the policy manuscript Gate"} is mechanically trusted.${untrustedSuffix(manuscriptGate)} Freeze evidence-bounded claims through researchctl before entering paper production.`);
   }
@@ -1952,6 +2063,10 @@ function preToolUse(context, input) {
   if (releasesExternally && (!releaseTarget || !gateTrusted(releaseGate, releaseTarget))) {
     const label = releaseTarget ? `${releaseGate}/${releaseTarget}` : (releaseGate || "the policy release Gate target");
     return deny(`This appears to send, submit, publish, or upload a manuscript/reviewer response while ${label} is not mechanically trusted.${untrustedSuffix(releaseGate, releaseTarget)} Record explicit human approval for the exact release target through researchctl first.`);
+  }
+
+  if (releasesExternally) {
+    return deny("The exact release Gate is mechanically trusted, but it does not authorize this direct send. Use a conforming external Adapter bound to the approved release package, an action-specific human authorization declaration, and a durable accepted attempt journal.");
   }
 
   return {};

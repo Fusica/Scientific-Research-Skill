@@ -32,6 +32,7 @@ POLICY_ROOT_FIELDS = {
     "review_language",
     "workspace_lifecycle",
     "authority_boundary",
+    "adapter_authority",
     "gates",
     "stages",
     "global_prohibited_actions",
@@ -177,6 +178,106 @@ def _validate_stage_semantics(
             _string_list(spec.get(field), f"stage {stage}.{field}")
     if len(references) != len(set(references)):
         raise ResearchCtlError("policy stage references must be unique")
+
+
+def _validate_adapter_authority(
+    raw: dict[str, Any],
+    *,
+    runtime: Any,
+    stage_order: list[str],
+    gate_sequence: tuple[tuple[str, str | None], ...],
+) -> None:
+    """Validate the machine authority map without making adapters Gate owners."""
+
+    authority = policy_object(raw.get("adapter_authority"), "adapter_authority")
+    _exact_fields(
+        authority,
+        {"human_authorization_effect_classes", "operation_kinds"},
+        "adapter_authority",
+    )
+    protected_effects = _string_list(
+        authority.get("human_authorization_effect_classes"),
+        "adapter_authority.human_authorization_effect_classes",
+    )
+    expected_protected = set(runtime.adapter_exchange_effect_classes) - {
+        "low_risk"
+    }
+    if set(protected_effects) != expected_protected:
+        raise ResearchCtlError(
+            "policy adapter_authority human authorization effects must be "
+            "every non-low-risk effect class"
+        )
+
+    operations = policy_object(
+        authority.get("operation_kinds"), "adapter_authority.operation_kinds"
+    )
+    if set(operations) != set(runtime.adapter_exchange_operation_kinds):
+        raise ResearchCtlError(
+            "policy adapter_authority.operation_kinds must define every runtime "
+            "operation kind exactly once"
+        )
+    known_gate_refs = set(gate_sequence)
+    for operation_kind in runtime.adapter_exchange_operation_kinds:
+        label = f"adapter_authority.operation_kinds.{operation_kind}"
+        spec = policy_object(operations.get(operation_kind), label)
+        _exact_fields(
+            spec,
+            {"allowed_stages", "required_gate_refs", "allowed_effect_classes"},
+            label,
+        )
+        allowed_stages = _string_list(spec.get("allowed_stages"), f"{label}.allowed_stages")
+        unknown_stages = set(allowed_stages) - set(stage_order)
+        if unknown_stages:
+            raise ResearchCtlError(
+                f"policy {label}.allowed_stages uses unknown stages: "
+                + ", ".join(sorted(unknown_stages))
+            )
+        effects = _string_list(
+            spec.get("allowed_effect_classes"),
+            f"{label}.allowed_effect_classes",
+        )
+        unknown_effects = set(effects) - set(runtime.adapter_exchange_effect_classes)
+        if unknown_effects:
+            raise ResearchCtlError(
+                f"policy {label}.allowed_effect_classes uses unknown effects: "
+                + ", ".join(sorted(unknown_effects))
+            )
+
+        refs = spec.get("required_gate_refs")
+        if not isinstance(refs, list):
+            raise ResearchCtlError(f"policy {label}.required_gate_refs must be a list")
+        normalized_refs: list[tuple[str, str | None]] = []
+        for index, candidate in enumerate(refs):
+            ref_label = f"{label}.required_gate_refs[{index}]"
+            gate_ref = policy_object(candidate, ref_label)
+            if set(gate_ref) not in ({"gate"}, {"gate", "target"}):
+                raise ResearchCtlError(
+                    f"policy {ref_label} fields must be exactly gate and optional target"
+                )
+            gate = _non_empty_string(gate_ref.get("gate"), f"{ref_label}.gate")
+            target = gate_ref.get("target")
+            if target is not None:
+                target = _non_empty_string(target, f"{ref_label}.target")
+            normalized = (gate, target)
+            if normalized not in known_gate_refs:
+                suffix = f"/{target}" if target is not None else ""
+                raise ResearchCtlError(
+                    f"policy {ref_label} references unknown GateRef {gate}{suffix}"
+                )
+            normalized_refs.append(normalized)
+        if len(normalized_refs) != len(set(normalized_refs)):
+            raise ResearchCtlError(f"policy {label}.required_gate_refs contains duplicates")
+        if any(effect != "low_risk" for effect in effects) and not normalized_refs:
+            raise ResearchCtlError(
+                f"policy {label} non-low-risk effects require at least one GateRef"
+            )
+        if "external_release" in effects:
+            if set(effects) != {"external_release"} or not all(
+                target is not None for _gate, target in normalized_refs
+            ):
+                raise ResearchCtlError(
+                    f"policy {label} external_release must use only targeted GateRefs"
+                )
 
 
 def _validate_gate_semantics(gate: str, spec: dict[str, Any]) -> None:
@@ -791,6 +892,12 @@ def load_policy() -> Policy:
         _validate_workflow_graph(
             workflow_graph, stage_order, normalized_specs
         )
+    )
+    _validate_adapter_authority(
+        raw,
+        runtime=runtime,
+        stage_order=stage_order,
+        gate_sequence=gate_sequence,
     )
     release_gates = [
         gate

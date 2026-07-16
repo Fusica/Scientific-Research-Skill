@@ -46,6 +46,27 @@ A typed directional link between stable record IDs. Target existence and endpoin
 **Research judgment — current policy**
 Researcher-authored interpretation of novelty, mechanism, evidence strength, exclusions, causal meaning, adequacy, or scientific value. It remains in canonical research artifacts and is never certified by record validation.
 
+**Conforming Adapter — current**
+A replaceable external tool wrapper that consumes a Core-verified request, durably registers the attempt's first `accepted` receipt before any side effect, then consumes immutable snapshots, performs the effect outside Core, and reports factual observations through the Adapter Exchange. It has no Gate or scientific-judgment authority.
+
+**Adapter Exchange — current**
+An append-only registered artifact containing immutable Adapter Requests and factual Adapter Receipts. It is operation provenance, not workflow or provider job state.
+
+**Adapter Request — current**
+A pre-dispatch record that names the operation, exact payload and input revisions, applicable Gate decision, effect class, action-specific human authorization declaration, and bounded retry policy.
+
+**Operation Binding — current**
+The mechanical binding recorded by an Adapter Request. It proves which registered revisions and authority declarations the supported dispatch named; it does not prove scientific completeness, provider truth, or a Run Contract.
+
+**Adapter Receipt — current**
+An append-only observation bound to one request Hash and attempt lineage. The first `accepted` receipt is the durable pre-side-effect journal and must pass current authority checks; later receipts remain factual imports. `succeeded` is provider-reported mechanical success, not evidence that a scientific claim is valid.
+
+**Dispatch verification — current**
+The read-only, time-of-check validation performed by `researchctl adapter verify` before a conforming Adapter journals a new attempt. It does not itself authorize a side effect: the first `accepted` receipt must next be registered while authority is current. A stale Gate, resolved or active attempt, exhausted budget, or unreconciled unknown outcome blocks verification.
+
+**Action-specific human authorization declaration — current policy**
+The request-scoped audit declaration required for every non-low-risk effect. Core validates its shape but does not authenticate the actor, infer consent, or replace the actual authority required by the user and policy.
+
 ## Capability claims
 
 **Process capability — accepted**

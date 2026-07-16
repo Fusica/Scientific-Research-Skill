@@ -82,6 +82,44 @@
     "Inside approved boundaries, AI may retrieve, analyze, draft, update and register artifacts, and run low-risk checks.",
     "Gate decisions, lifecycle decisions, costly experiments, external release, destructive operations, and safety-relevant execution remain human decisions."
   ],
+  "adapter_authority": {
+    "human_authorization_effect_classes": [
+      "costly_compute",
+      "destructive",
+      "safety_relevant",
+      "external_release"
+    ],
+    "operation_kinds": {
+      "evidence_retrieval": {
+        "allowed_stages": ["idea", "literature", "method", "experiment_results", "paper", "revision"],
+        "required_gate_refs": [],
+        "allowed_effect_classes": ["low_risk"]
+      },
+      "experiment_execution": {
+        "allowed_stages": ["experiment_results"],
+        "required_gate_refs": [{"gate": "method_experiment_approval"}],
+        "allowed_effect_classes": ["low_risk", "costly_compute", "safety_relevant"]
+      },
+      "result_import": {
+        "allowed_stages": ["experiment_results", "paper", "revision"],
+        "required_gate_refs": [{"gate": "method_experiment_approval"}],
+        "allowed_effect_classes": ["low_risk"]
+      },
+      "paper_production": {
+        "allowed_stages": ["paper", "revision"],
+        "required_gate_refs": [{"gate": "claim_freeze"}],
+        "allowed_effect_classes": ["low_risk"]
+      },
+      "external_release": {
+        "allowed_stages": ["revision"],
+        "required_gate_refs": [
+          {"gate": "release", "target": "initial_submission"},
+          {"gate": "release", "target": "revision_rebuttal"}
+        ],
+        "allowed_effect_classes": ["external_release"]
+      }
+    }
+  },
   "gates": {
     "idea_freeze": {
       "label": "Idea freeze",
