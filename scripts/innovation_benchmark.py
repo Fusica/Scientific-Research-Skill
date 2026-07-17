@@ -190,7 +190,10 @@ def _bootstrap_lcb(query_values: list[float]) -> float:
     generator = random.Random(0)
     count = len(query_values)
     bootstrap_means = [
-        sum(query_values[generator.randrange(count)] for _ in range(count)) / count
+        math.fsum(
+            query_values[generator.randrange(count)] for _ in range(count)
+        )
+        / count
         for _ in range(10_000)
     ]
     bootstrap_means.sort()
@@ -376,17 +379,17 @@ def _track_a(value: Any) -> dict[str, Any]:
                 scientific_score[field] - evo_score[field]
             )
         query_deltas[query_id]["composite"].append(
-            sum(
+            math.fsum(
                 scientific_score[field] - evo_score[field]
                 for field in SCORE_FIELDS
             )
             / len(SCORE_FIELDS)
         )
         run_quality["scientific-research-skill"][run_id].append(
-            sum(scientific_score.values()) / len(SCORE_FIELDS)
+            math.fsum(scientific_score.values()) / len(SCORE_FIELDS)
         )
         run_quality["evo"][run_id].append(
-            sum(evo_score.values()) / len(SCORE_FIELDS)
+            math.fsum(evo_score.values()) / len(SCORE_FIELDS)
         )
     if set(query_deltas) != set(held_out):
         raise InnovationRawError(
@@ -412,7 +415,7 @@ def _track_a(value: Any) -> dict[str, Any]:
     dimension_lcbs = {
         field: _bootstrap_lcb(
             [
-                sum(query_deltas[query_id][field])
+                math.fsum(query_deltas[query_id][field])
                 / len(query_deltas[query_id][field])
                 for query_id in sorted(query_deltas)
             ]
@@ -421,7 +424,7 @@ def _track_a(value: Any) -> dict[str, Any]:
     }
     composite_lcb = _bootstrap_lcb(
         [
-            sum(query_deltas[query_id]["composite"])
+            math.fsum(query_deltas[query_id]["composite"])
             / len(query_deltas[query_id]["composite"])
             for query_id in sorted(query_deltas)
         ]
@@ -558,8 +561,8 @@ def _track_a(value: Any) -> dict[str, Any]:
             )
     cost_totals = {
         system: {
-            "token_cost": sum(item["token_cost"] for item in observations),
-            "monetary_cost": sum(
+            "token_cost": math.fsum(item["token_cost"] for item in observations),
+            "monetary_cost": math.fsum(
                 item["monetary_cost"] for item in observations
             ),
         }
@@ -629,7 +632,7 @@ def _track_a(value: Any) -> dict[str, Any]:
         system_score = _score(item.get("system_score"), f"{label}.system_score")
         _score(item.get("evo_score"), f"{label}.evo_score")
         third_quality[system][run_id].append(
-            sum(system_score.values()) / len(SCORE_FIELDS)
+            math.fsum(system_score.values()) / len(SCORE_FIELDS)
         )
     if not third_systems and raw_pareto:
         raise InnovationRawError(
@@ -663,14 +666,14 @@ def _track_a(value: Any) -> dict[str, Any]:
                 f"expert quality ratings for {system} must cover every frozen run"
             )
         per_run_quality = [
-            sum(quality_rows[run_id]) / len(quality_rows[run_id])
+            math.fsum(quality_rows[run_id]) / len(quality_rows[run_id])
             for run_id in sorted(run_ids)
         ]
         grouped.append(
             {
                 "system": system,
                 "run_ids": sorted(run_ids),
-                "quality_score": sum(per_run_quality) / len(per_run_quality),
+                "quality_score": math.fsum(per_run_quality) / len(per_run_quality),
                 "token_cost": cost_totals[system]["token_cost"],
                 "monetary_cost": cost_totals[system]["monetary_cost"],
             }
@@ -692,8 +695,8 @@ def _track_a(value: Any) -> dict[str, Any]:
         "repair_success": repair_success,
         "false_prune_rate": false_prune_rate,
         "top1_in_expert_top3_rate": top1_rate,
-        "normalized_regret": sum(regrets) / len(regrets),
-        "kendall_tau": sum(taus) / len(taus),
+        "normalized_regret": math.fsum(regrets) / len(regrets),
+        "kendall_tau": math.fsum(taus) / len(taus),
         "token_ratio_vs_evo": token_ratio,
         "cost_ratio_vs_evo": monetary_ratio,
         "pareto_observations": grouped if exception_required else None,
@@ -874,7 +877,7 @@ def _track_b(value: Any) -> dict[str, Any]:
             final_cycle["baseline"] - final_cycle["warm"]
         )
         / final_cycle["baseline"],
-        "overall_idea_quality_delta": sum(final_cycle["quality_deltas"])
+        "overall_idea_quality_delta": math.fsum(final_cycle["quality_deltas"])
         / len(final_cycle["quality_deltas"]),
         "false_prune_rate": _rate(
             final_cycle["false_pruned"],

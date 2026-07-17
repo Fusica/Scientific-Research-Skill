@@ -555,6 +555,27 @@ class CapabilityAcceptanceTest(unittest.TestCase):
                     innovation,
                 )
 
+    def test_track_a_thresholds_tolerate_only_machine_roundoff(self) -> None:
+        report = valid_report()
+        track = report["innovation_benchmark"]["track_a"]
+        track["normalized_regret"] = 0.05 + 5e-13
+        track["kendall_tau"] = 0.70 - 5e-13
+
+        rounded = evaluate_report(report)
+
+        self.assertTrue(
+            rounded["innovation_benchmark"]["reported_track_a_thresholds_passed"]
+        )
+
+        track["normalized_regret"] = 0.05 + 2e-12
+        outside_tolerance = evaluate_report(report)
+
+        self.assertFalse(
+            outside_tolerance["innovation_benchmark"][
+                "reported_track_a_thresholds_passed"
+            ]
+        )
+
     def test_track_a_missing_metric_and_insufficient_design_fail(self) -> None:
         missing = valid_report()
         del missing["innovation_benchmark"]["track_a"]["flaw_recall"]

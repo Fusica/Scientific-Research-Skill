@@ -578,58 +578,62 @@ def _copy_to_destination(root: Path, publication: Publication) -> None:
                 destination_digest.update(block)
                 destination_size += len(block)
             destination_after = os.fstat(output.fileno())
-        _verify_source_topology(publication)
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if identity_before != identity_after:
-            raise ResearchCtlError(
-                f"publication source changed while being copied: {publication.source}"
+            # Keep this fd open through the path check so an unlink/recreate
+            # cannot recycle the just-published inode and masquerade as it.
+            _verify_source_topology(publication)
+            identity_before = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
             )
-        destination_hash = f"sha256:{destination_digest.hexdigest()}"
-        if (
-            (destination_after.st_dev, destination_after.st_ino)
-            != (destination_identity.st_dev, destination_identity.st_ino)
-            or destination_after.st_size != destination_size
-            or (destination_hash, destination_size)
-            != (
-                publication.content_hash,
-                publication.size_bytes,
+            identity_after = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
             )
-        ):
-            raise ResearchCtlError(
-                f"publication source changed after preflight: {publication.source}"
+            if identity_before != identity_after:
+                raise ResearchCtlError(
+                    f"publication source changed while being copied: {publication.source}"
+                )
+            destination_hash = f"sha256:{destination_digest.hexdigest()}"
+            if (
+                (destination_after.st_dev, destination_after.st_ino)
+                != (destination_identity.st_dev, destination_identity.st_ino)
+                or destination_after.st_size != destination_size
+                or (destination_hash, destination_size)
+                != (
+                    publication.content_hash,
+                    publication.size_bytes,
+                )
+            ):
+                raise ResearchCtlError(
+                    f"publication source changed after preflight: {publication.source}"
+                )
+            published = (
+                os.stat(
+                    publication.destination.name,
+                    dir_fd=publication.parent_fd,
+                    follow_symlinks=False,
+                )
+                if publication.parent_fd is not None and os.name != "nt"
+                else publication.destination.stat(follow_symlinks=False)
             )
-        published = (
-            os.stat(
-                publication.destination.name,
-                dir_fd=publication.parent_fd,
-                follow_symlinks=False,
-            )
-            if publication.parent_fd is not None and os.name != "nt"
-            else publication.destination.stat(follow_symlinks=False)
-        )
-        if (published.st_dev, published.st_ino) != (
-            destination_identity.st_dev,
-            destination_identity.st_ino,
-        ):
-            raise ResearchCtlError(
-                f"publication destination identity changed while being filled: "
-                f"{publication.destination}"
-            )
-        if publication.parent_fd is not None:
-            os.fsync(publication.parent_fd)
+            if (
+                not stat.S_ISREG(published.st_mode)
+                or (published.st_dev, published.st_ino)
+                != (destination_identity.st_dev, destination_identity.st_ino)
+                or published.st_size != destination_size
+            ):
+                raise ResearchCtlError(
+                    f"publication destination identity changed while being filled: "
+                    f"{publication.destination}"
+                )
+            if publication.parent_fd is not None:
+                os.fsync(publication.parent_fd)
     except FileExistsError as exc:
         raise ResearchCtlError(
             "Reference Stack publication cannot overwrite an existing project path: "

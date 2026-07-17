@@ -769,7 +769,7 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
             if calls == 2:
                 item.destination.unlink()
                 item.destination.write_text(
-                    "unrelated replacement\n", encoding="utf-8"
+                    "other publication\n", encoding="utf-8"
                 )
 
         try:
@@ -786,7 +786,7 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
             publish_module._cleanup([publication])
 
         self.assertEqual(
-            destination.read_text(encoding="utf-8"), "unrelated replacement\n"
+            destination.read_text(encoding="utf-8"), "other publication\n"
         )
 
     def test_adapter_request_is_registered_then_verified_without_adapter_state(

@@ -1261,7 +1261,11 @@ def _threshold_min(
         minimum=0.0 if rate else None,
         maximum=1.0 if rate else None,
     )
-    if number is not None and number < threshold:
+    if (
+        number is not None
+        and number < threshold
+        and not math.isclose(number, threshold, rel_tol=0.0, abs_tol=1e-12)
+    ):
         errors.append(f"{path}={number} is below the frozen threshold {threshold}")
     return number
 
@@ -1281,7 +1285,11 @@ def _threshold_max(
         minimum=0.0 if rate else None,
         maximum=1.0 if rate else None,
     )
-    if number is not None and number > threshold:
+    if (
+        number is not None
+        and number > threshold
+        and not math.isclose(number, threshold, rel_tol=0.0, abs_tol=1e-12)
+    ):
         errors.append(f"{path}={number} exceeds the frozen threshold {threshold}")
     return number
 
@@ -1509,7 +1517,11 @@ def _validate_track_a(value: Any) -> tuple[bool, list[str]]:
         minimum=-1.0,
         maximum=1.0,
     )
-    if kendall_tau is not None and kendall_tau < 0.70:
+    if (
+        kendall_tau is not None
+        and kendall_tau < 0.70
+        and not math.isclose(kendall_tau, 0.70, rel_tol=0.0, abs_tol=1e-12)
+    ):
         errors.append(
             f"{path}.kendall_tau={kendall_tau} is below the frozen threshold 0.7"
         )
@@ -1520,7 +1532,9 @@ def _validate_track_a(value: Any) -> tuple[bool, list[str]]:
     exceeding_ratios = {
         field: value
         for field, value in ratios.items()
-        if value is not None and value > 1.25
+        if value is not None
+        and value > 1.25
+        and not math.isclose(value, 1.25, rel_tol=0.0, abs_tol=1e-12)
     }
     for field, value in exceeding_ratios.items():
         if track.get("pareto_observations") is None:
@@ -1528,7 +1542,9 @@ def _validate_track_a(value: Any) -> tuple[bool, list[str]]:
                 f"{path}.{field}={value} exceeds 1.25 without structured "
                 "same-run Pareto observations"
             )
-        if value > 2.0:
+        if value > 2.0 and not math.isclose(
+            value, 2.0, rel_tol=0.0, abs_tol=1e-12
+        ):
             errors.append(
                 f"{path}.{field}={value} exceeds the bounded Pareto exception cap 2.0"
             )
