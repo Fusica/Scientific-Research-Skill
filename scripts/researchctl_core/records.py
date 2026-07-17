@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +27,30 @@ class PendingRecordManifest:
 
 @dataclass(frozen=True)
 class RecordInspection:
-    """Stable diagnostics returned through the scientific-record seam."""
+    """Stable diagnostics and projection returned through the record seam."""
 
     errors: tuple[str, ...]
     record_count: int
+    warnings: tuple[str, ...] = ()
+    nodes: tuple[dict[str, Any], ...] = ()
+    edges: tuple[dict[str, str], ...] = ()
+    diagnostics: dict[str, tuple[Any, ...]] = field(
+        default_factory=lambda: {
+            "dangling": (),
+            "duplicates": (),
+            "invalid_supersedes": (),
+            "cycles": (),
+            "orphans": (),
+        }
+    )
+
+
+@dataclass
+class _DiagnosticCollector:
+    dangling: list[dict[str, str]] = field(default_factory=list)
+    duplicates: list[dict[str, str]] = field(default_factory=list)
+    invalid_supersedes: list[dict[str, Any]] = field(default_factory=list)
+    cycles: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -54,6 +74,9 @@ class _ManifestRevision:
 class _ParsedManifest:
     source: _ManifestRevision
     records: tuple[dict[str, Any], ...]
+
+
+_RecordOwner = tuple[str, str, dict[str, Any], _ParsedManifest]
 
 
 def _field_errors(
@@ -172,6 +195,7 @@ def _validate_relations(
     label: str,
     policy: Policy,
     errors: list[str],
+    diagnostics: _DiagnosticCollector,
 ) -> None:
     if not isinstance(value, list):
         errors.append(f"{label} must be a list")
@@ -199,6 +223,14 @@ def _validate_relations(
             key = (relation_kind, target_id)
             if key in seen:
                 errors.append(f"{relation_label} duplicates relation {key!r}")
+                diagnostics.duplicates.append(
+                    {
+                        "kind": "relation",
+                        "identifier": f"{relation_kind}:{target_id}",
+                        "location": relation_label,
+                        "owner": label,
+                    }
+                )
             seen.add(key)
 
 
@@ -208,6 +240,7 @@ def _parse_manifest(
     state: dict[str, Any],
     policy: Policy,
     errors: list[str],
+    diagnostics: _DiagnosticCollector,
 ) -> _ParsedManifest | None:
     raw = _load_json(source, errors)
     manifest, field_problems = _field_errors(
@@ -256,6 +289,14 @@ def _parse_manifest(
             errors.append(f"{record_label}.record_id has an invalid format")
         elif record_id in prior_kinds:
             errors.append(f"{record_label}.record_id {record_id!r} is duplicated")
+            diagnostics.duplicates.append(
+                {
+                    "kind": "record",
+                    "identifier": record_id,
+                    "location": record_label,
+                    "owner": source.label,
+                }
+            )
         if record_kind not in policy.runtime.scientific_record_kinds:
             errors.append(
                 f"{record_label}.record_kind {record_kind!r} is unsupported"
@@ -276,20 +317,52 @@ def _parse_manifest(
                 errors.append(
                     f"{record_label}.supersedes must be null or a valid record ID"
                 )
+                diagnostics.invalid_supersedes.append(
+                    {
+                        "record_id": record_id,
+                        "supersedes": supersedes,
+                        "reason": "invalid_id",
+                        "location": record_label,
+                    }
+                )
             elif supersedes not in prior_kinds:
                 errors.append(
                     f"{record_label}.supersedes must reference an earlier record "
                     "in this manifest"
+                )
+                diagnostics.invalid_supersedes.append(
+                    {
+                        "record_id": record_id,
+                        "supersedes": supersedes,
+                        "reason": "not_earlier_in_manifest",
+                        "location": record_label,
+                    }
                 )
             else:
                 if prior_kinds[supersedes] != record_kind:
                     errors.append(
                         f"{record_label}.supersedes must reference the same record_kind"
                     )
+                    diagnostics.invalid_supersedes.append(
+                        {
+                            "record_id": record_id,
+                            "supersedes": supersedes,
+                            "reason": "kind_mismatch",
+                            "location": record_label,
+                        }
+                    )
                 if supersedes in superseded_by:
                     errors.append(
                         f"{record_label}.supersedes branches correction lineage already "
                         f"continued by {superseded_by[supersedes]}"
+                    )
+                    diagnostics.invalid_supersedes.append(
+                        {
+                            "record_id": record_id,
+                            "supersedes": supersedes,
+                            "reason": "branch",
+                            "location": record_label,
+                        }
                     )
                 elif isinstance(record_id, str):
                     superseded_by[supersedes] = record_id
@@ -298,6 +371,7 @@ def _parse_manifest(
             label=f"{record_label}.relations",
             policy=policy,
             errors=errors,
+            diagnostics=diagnostics,
         )
         if valid_id and isinstance(record_id, str) and isinstance(record_kind, str):
             prior_kinds.setdefault(record_id, record_kind)
@@ -349,14 +423,25 @@ def _registered_manifest_revisions(
 def _validate_relation_endpoints(
     manifests: list[_ParsedManifest],
     *,
-    owners: dict[str, tuple[str, str]],
+    owners: dict[str, _RecordOwner],
     policy: Policy,
     errors: list[str],
-) -> None:
+    diagnostics: _DiagnosticCollector,
+) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
     for manifest in manifests:
         for record_index, record in enumerate(manifest.records):
+            source_id = record.get("record_id")
             source_kind = record.get("record_kind")
-            if source_kind not in policy.runtime.scientific_record_kinds:
+            if (
+                not isinstance(source_id, str)
+                or source_kind not in policy.runtime.scientific_record_kinds
+            ):
+                continue
+            source_label = f"{manifest.source.label}.records[{record_index}]"
+            owner = owners.get(source_id)
+            if owner is None or owner[1] != source_label:
                 continue
             relations = record.get("relations")
             if not isinstance(relations, list):
@@ -383,8 +468,16 @@ def _validate_relation_endpoints(
                     errors.append(
                         f"{label}.target_id references unknown record {target_id!r}"
                     )
+                    diagnostics.dangling.append(
+                        {
+                            "source_id": source_id,
+                            "relation": relation_kind,
+                            "target_id": target_id,
+                            "location": label,
+                        }
+                    )
                     continue
-                target_kind, _target_label = target
+                target_kind, _target_label, _target_record, _target_manifest = target
                 source_kinds, target_kinds = (
                     policy.runtime.scientific_record_relation_signatures[
                         relation_kind
@@ -395,6 +488,185 @@ def _validate_relation_endpoints(
                         f"{label} relation {relation_kind!r} does not allow "
                         f"{source_kind} -> {target_kind}"
                     )
+                    continue
+                edge_key = (source_id, relation_kind, target_id)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    edges.append(
+                        {
+                            "source_id": source_id,
+                            "relation": relation_kind,
+                            "target_id": target_id,
+                        }
+                    )
+    return edges
+
+
+def _stable_dicts(values: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    unique: dict[str, dict[str, Any]] = {}
+    for value in values:
+        key = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        unique.setdefault(key, value)
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _projection_nodes(
+    owners: dict[str, _RecordOwner],
+) -> tuple[dict[str, Any], ...]:
+    nodes: list[dict[str, Any]] = []
+    for record_id in sorted(owners):
+        record_kind, _label, record, manifest = owners[record_id]
+        source = record.get("source")
+        source_projection = (
+            {key: source[key] for key in sorted(source)}
+            if isinstance(source, dict)
+            else {}
+        )
+        nodes.append(
+            {
+                "record_id": record_id,
+                "record_kind": record_kind,
+                "stage": manifest.source.stage,
+                "manifest_artifact_id": manifest.source.artifact_id,
+                "manifest_revision": manifest.source.revision,
+                "pending": manifest.source.pending,
+                "source": source_projection,
+                "supersedes": record.get("supersedes"),
+            }
+        )
+    return tuple(nodes)
+
+
+def _supersedes_edges(
+    owners: dict[str, _RecordOwner],
+) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for record_id in sorted(owners):
+        record_kind, _label, record, _manifest = owners[record_id]
+        supersedes = record.get("supersedes")
+        target = owners.get(supersedes) if isinstance(supersedes, str) else None
+        if target is not None and target[0] == record_kind:
+            edges.append(
+                {
+                    "source_id": record_id,
+                    "relation": "supersedes",
+                    "target_id": supersedes,
+                }
+            )
+    return edges
+
+
+def _cycle_components(
+    node_ids: tuple[str, ...],
+    edges: list[dict[str, str]],
+) -> list[tuple[str, ...]]:
+    """Return deterministic strongly connected components that contain cycles."""
+
+    adjacency: dict[str, set[str]] = {record_id: set() for record_id in node_ids}
+    reverse: dict[str, set[str]] = {record_id: set() for record_id in node_ids}
+    self_loops: set[str] = set()
+    for edge in edges:
+        source = edge["source_id"]
+        target = edge["target_id"]
+        if source not in adjacency or target not in adjacency:
+            continue
+        adjacency[source].add(target)
+        reverse[target].add(source)
+        if source == target:
+            self_loops.add(source)
+
+    visited: set[str] = set()
+    finish_order: list[str] = []
+    for start in sorted(node_ids):
+        if start in visited:
+            continue
+        visited.add(start)
+        stack: list[tuple[str, bool]] = [(start, False)]
+        while stack:
+            current, expanded = stack.pop()
+            if expanded:
+                finish_order.append(current)
+                continue
+            stack.append((current, True))
+            for neighbor in sorted(adjacency[current], reverse=True):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append((neighbor, False))
+
+    assigned: set[str] = set()
+    cycles: list[tuple[str, ...]] = []
+    for start in reversed(finish_order):
+        if start in assigned:
+            continue
+        assigned.add(start)
+        component: list[str] = []
+        component_stack = [start]
+        while component_stack:
+            current = component_stack.pop()
+            component.append(current)
+            for neighbor in sorted(reverse[current], reverse=True):
+                if neighbor not in assigned:
+                    assigned.add(neighbor)
+                    component_stack.append(neighbor)
+        normalized = tuple(sorted(component))
+        if len(normalized) > 1 or normalized[0] in self_loops:
+            cycles.append(normalized)
+    return sorted(cycles)
+
+
+def _diagnose_cycles(
+    node_ids: tuple[str, ...],
+    relation_edges: list[dict[str, str]],
+    *,
+    errors: list[str],
+    warnings: list[str],
+    diagnostics: _DiagnosticCollector,
+) -> None:
+    derived_edges = [
+        edge for edge in relation_edges if edge["relation"] == "derived_from"
+    ]
+    for component in _cycle_components(node_ids, derived_edges):
+        records = ", ".join(component)
+        errors.append(f"derived_from relation cycle detected among records: {records}")
+        diagnostics.cycles.append(
+            {
+                "record_ids": list(component),
+                "relations": ["derived_from"],
+                "severity": "error",
+            }
+        )
+
+    for component in _cycle_components(node_ids, relation_edges):
+        member_set = set(component)
+        relations = sorted(
+            {
+                edge["relation"]
+                for edge in relation_edges
+                if edge["source_id"] in member_set
+                and edge["target_id"] in member_set
+            }
+        )
+        if relations == ["derived_from"]:
+            continue
+        records = ", ".join(component)
+        warnings.append(
+            "record relation cycle detected among records "
+            f"{records}; preserved as a diagnostic because only derived_from "
+            "cycles are mechanically invalid"
+        )
+        diagnostics.cycles.append(
+            {
+                "record_ids": list(component),
+                "relations": relations,
+                "severity": "warning",
+            }
+        )
 
 
 def inspect_record_manifests(
@@ -413,6 +685,8 @@ def inspect_record_manifests(
     """
 
     errors: list[str] = []
+    warnings: list[str] = []
+    diagnostics = _DiagnosticCollector()
     sources = _registered_manifest_revisions(root, state, policy)
     if pending is not None:
         existing_numbers = [
@@ -439,6 +713,7 @@ def inspect_record_manifests(
             state=state,
             policy=policy,
             errors=errors,
+            diagnostics=diagnostics,
         )
         if candidate is not None:
             parsed.append(candidate)
@@ -449,7 +724,8 @@ def inspect_record_manifests(
             (manifest.source.stage, manifest.source.artifact_id), []
         ).append(manifest)
     current: list[_ParsedManifest] = []
-    for history in by_artifact.values():
+    for key in sorted(by_artifact):
+        history = by_artifact[key]
         history.sort(key=lambda item: item.source.revision)
         for previous, candidate in zip(history, history[1:]):
             previous_records = previous.records
@@ -463,8 +739,15 @@ def inspect_record_manifests(
                 )
         current.append(history[-1])
 
-    owners: dict[str, tuple[str, str]] = {}
-    for manifest in current:
+    owners: dict[str, _RecordOwner] = {}
+    for manifest in sorted(
+        current,
+        key=lambda item: (
+            item.source.stage,
+            item.source.artifact_id,
+            item.source.revision,
+        ),
+    ):
         for index, record in enumerate(manifest.records):
             record_id = record.get("record_id")
             record_kind = record.get("record_kind")
@@ -473,21 +756,78 @@ def inspect_record_manifests(
             label = f"{manifest.source.label}.records[{index}]"
             if record_kind not in policy.runtime.scientific_record_kinds:
                 continue
-            prior = owners.setdefault(record_id, (record_kind, label))
+            prior = owners.setdefault(
+                record_id,
+                (record_kind, label, record, manifest),
+            )
             if prior[1] != label:
                 errors.append(
                     f"{label}.record_id {record_id!r} duplicates project record "
                     f"owned by {prior[1]}"
                 )
+                diagnostics.duplicates.append(
+                    {
+                        "kind": "record",
+                        "identifier": record_id,
+                        "location": label,
+                        "owner": prior[1],
+                    }
+                )
 
-    _validate_relation_endpoints(
+    relation_edges = _validate_relation_endpoints(
         current,
         owners=owners,
         policy=policy,
         errors=errors,
+        diagnostics=diagnostics,
+    )
+    node_ids = tuple(sorted(owners))
+    _diagnose_cycles(
+        node_ids,
+        relation_edges,
+        errors=errors,
+        warnings=warnings,
+        diagnostics=diagnostics,
+    )
+
+    all_edges = relation_edges + _supersedes_edges(owners)
+    connected = {
+        endpoint
+        for edge in all_edges
+        for endpoint in (edge["source_id"], edge["target_id"])
+    }
+    orphans = tuple(record_id for record_id in node_ids if record_id not in connected)
+    if orphans:
+        preview = ", ".join(orphans[:10])
+        suffix = f", and {len(orphans) - 10} more" if len(orphans) > 10 else ""
+        warnings.append(
+            f"{len(orphans)} structurally orphaned record(s) have no valid relation "
+            f"or correction-lineage edge: {preview}{suffix}"
+        )
+    edges = tuple(
+        sorted(
+            all_edges,
+            key=lambda edge: (
+                edge["source_id"],
+                edge["relation"],
+                edge["target_id"],
+            ),
+        )
     )
 
     return RecordInspection(
         errors=tuple(errors),
         record_count=len(owners),
+        warnings=tuple(warnings),
+        nodes=_projection_nodes(owners),
+        edges=edges,
+        diagnostics={
+            "dangling": _stable_dicts(diagnostics.dangling),
+            "duplicates": _stable_dicts(diagnostics.duplicates),
+            "invalid_supersedes": _stable_dicts(
+                diagnostics.invalid_supersedes
+            ),
+            "cycles": _stable_dicts(diagnostics.cycles),
+            "orphans": orphans,
+        },
     )

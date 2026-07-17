@@ -43,6 +43,15 @@ An append-only registered artifact that declares stage-local Scientific records 
 **Record relation — current**
 A typed directional link between stable record IDs. Target existence and endpoint-kind compatibility are mechanically validatable, but its scientific truth and sufficiency remain Research judgment.
 
+**Project-local Trace Graph — current read-only projection**
+The deterministic forward and reverse projection rebuilt from registered record-manifest snapshots by `researchctl trace`, Dashboard, doctor, and audit. It is never persisted as graph state. `derived_from` ancestry cycles are errors; other cycles and structurally orphaned records are warnings, not scientific verdicts.
+
+**Offline Audit Bundle — current external hand-off**
+A deterministic, no-clobber tar exported to a new path outside the research project. It contains canonical state and contracts, non-authoritative memory, every historical snapshot, and a same-evidence trace projection for bundled-contract verification.
+
+**Audit evidence root — current integrity handle**
+The bundle-manifest Hash that must be retained independently to authenticate the expected hand-off. It does not by itself prove origin, human identity, authorization, provider truth, or scientific correctness.
+
 **Research judgment — current policy**
 Researcher-authored interpretation of novelty, mechanism, evidence strength, exclusions, causal meaning, adequacy, or scientific value. It remains in canonical research artifacts and is never certified by record validation.
 
@@ -85,10 +94,17 @@ A process capability closed by Core plus its declared Reference Stack, including
 Implemented behavior available in the named release. Current does not imply that a comparative or end-to-end benchmark has passed.
 
 **Target capability status — accepted**
-An acceptance objective that is not yet a claim about the current release.
+An acceptance objective that is not yet a claim about the current release. A
+`target_contract_valid` result proves only that the objective is shaped correctly;
+its declared evidence is explicitly unverified.
 
 **Benchmark-verified capability status — accepted**
 A capability demonstrated by a named version against a frozen harness, corpus, date, and retained report.
+
+**Acceptance evidence pack — current maintainer contract**
+A report-adjacent, independently hashed manifest of regular retained files. Current
+and Benchmark-verified claims resolve evidence and provenance by artifact ID, verify
+path, size, and content Hash, and derive outcome fields from the retained bytes.
 
 **High — accepted capability level**
 The declared scope is process-complete, evidence-traceable, recoverable at material failures, and validated by deterministic and representative-scenario checks.
@@ -98,6 +114,36 @@ High plus end-to-end closure within the declared boundary, with cross-stage, ada
 
 **Approaches Evo — accepted comparison result**
 A statistical non-inferiority result from the frozen two-track benchmark. It is neither a synonym for Very high nor a guarantee of real novelty.
+
+**Innovation protocol — current stage semantics**
+The bounded Idea procedure in `01-idea.md`: at least three declared seed passes, typed variation with multi-parent lineage, position-swapped pairwise review, three adversarial lenses, repair or failure feedback, selector diagnostics, and preservation of unsuccessful work. Runtime validation does not prove context isolation, novelty, or review quality.
+
+**Independent seed pass — current semantic declaration**
+A candidate-generation pass that sees the common brief, evidence, and constraints but no peer candidate or generator rationale. `isolated` is valid only when that context boundary exists; otherwise the portfolio records `declared_nonisolated`.
+
+**Selector recommendation — current stage semantics**
+The retained internal top one and top three with reasons, coverage, and ordering limitations. It organizes human review but is neither novelty evidence, candidate selection authority, nor Idea Gate approval.
+
+**Project-local warm cycle — current stage semantics**
+A related Idea cycle inside the same paper-bound mainline that may reuse registered portfolio history, evidence, failures, and project navigation hints. It creates no Codex-global or implicit cross-workspace research memory, and memory remains non-evidence.
+
+**Paper production semantic contract — current stage semantics**
+The source, build, venue, verification, render, claim, citation, number, anonymity, package, and revision-consistency procedure in `05-paper.md` and `06-revision.md`. It defines required research artifacts and reviews but does not mean a named Reference Paper Adapter has passed end-to-end acceptance.
+
+**Venue Profile — current stage semantics**
+A source-cited, dated declaration inside the applicable release checklist that records venue requirements, applicability, conflicts, and unknowns. Registration and Gate binding identify the reviewed declaration; they do not certify that an external venue rule is current or true.
+
+**Verification check class — current stage semantics**
+One of `mechanical`, `researcher_review`, or `venue_fact`. The class states whether a result is reproducible tool output, scientific or visual human judgment, or a sourced external requirement; it prevents a successful build or text scan from masquerading as paper correctness.
+
+**Reference Isolated Command Adapter — current**
+The shipped `scripts/reference_stack.py` Adapter for `experiment_execution` and `paper_production`. It consumes exact registered inputs in a clean temporary directory and journals through public `researchctl` calls; its network declaration is not enforced, and its mechanical result is not scientific, venue, Gate, or submission authority.
+
+**Reference Paper Adapter — current implementation surface, Target acceptance**
+The paper-production mode of the Reference Isolated Command Adapter. It materializes exact registered paper inputs, runs declared tool probes and clean/build argument vectors, retains logs and output provenance, and reports factual mechanical results. It does not perform or replace researcher-review and venue-fact checks, approve release, or authorize submission; representative paper field trials remain required for the capability target.
+
+**Semantic acceptance harness — current maintainer tool**
+The strict `scripts/validate_acceptance.py` evaluation surface that requires class-specific immutable evidence provenance; prevents one retained build report or identical bytes from satisfying incompatible classes; keeps venue facts, human review, Adapter runs, recovery, offline audit, representative scenarios, adversarial checks, cross-stage checks, and benchmarks distinct; and computes any bounded Pareto exception from same-run observations. It is not workflow state, Gate policy, a status promoter, or proof of scientific correctness.
 
 ## Exploration and experiments
 
@@ -126,7 +172,7 @@ The evidence-bounded map from claims to runs, analyses, limitations, status, and
 Use the owning procedures and templates in `skills/research/references/04-experiment-results.md`; this glossary does not restate or extend them.
 
 **Run Contract — deferred**
-A proposed immutable binding of code Hash, configuration, data scope, seed set, resource limit, and expected observation for one approved run. Current experiment specifications are artifacts, not first-class per-launch permits.
+A proposed immutable binding of code Hash, configuration, data scope, seed set, resource limit, and expected observation for one approved run. Current experiment specifications and Operation Bindings are artifacts, not first-class per-launch permits. Promotion remains gated by the three-experiment Pilot and an accepted decision; current retry semantics must not be described as a Run Contract.
 
 **Pilot — deferred**
 A proposed pre-formal-experiment path for bounded exploratory execution. The current Hook instead uses the stage-level method and experiment approval Gate.

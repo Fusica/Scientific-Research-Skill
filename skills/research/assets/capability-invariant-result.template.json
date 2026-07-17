@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "invariant_id": "human_gate_authority",
+  "passed": false,
+  "finding": "Replace this template with the retained factual invariant result."
+}

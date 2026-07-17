@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -72,6 +73,70 @@ class DashboardV2Test(ResearchProjectTestCase):
         missing = self.run_ctl("dashboard")
         self.assertEqual(missing.returncode, 0, missing.stderr)
         self.assertIn('badge missing">missing', self.dashboard_path.read_text(encoding="utf-8"))
+
+    def test_dashboard_rebuilds_bidirectional_record_trace(self) -> None:
+        source_id, _source, registered = self.register(
+            "idea.idea_card", "IDEA-DASHBOARD-TRACE"
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        revision = self.artifact_entry("idea.idea_card", source_id)[
+            "current_revision"
+        ]
+        manifest = {
+            "schema_version": "1.0",
+            "stage": "idea",
+            "records": [
+                {
+                    "record_id": "IDEA-DASH-A",
+                    "record_kind": "candidate",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": source_id,
+                        "revision": revision,
+                        "locator": "#idea-dash-a",
+                    },
+                    "supersedes": None,
+                    "relations": [],
+                },
+                {
+                    "record_id": "IDEA-DASH-B",
+                    "record_kind": "candidate",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": source_id,
+                        "revision": revision,
+                        "locator": "#idea-dash-b",
+                    },
+                    "supersedes": None,
+                    "relations": [
+                        {
+                            "relation": "derived_from",
+                            "target_id": "IDEA-DASH-A",
+                        }
+                    ],
+                },
+            ],
+        }
+        path = self.project / "work/idea/dashboard-records.json"
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _identifier, _path, records = self.register(
+            "idea.record_manifest", "IDEA-DASHBOARD-RECORDS", path=path
+        )
+        self.assertEqual(records.returncode, 0, records.stderr)
+
+        result = self.run_ctl("dashboard", "--verify")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        page = self.dashboard_path.read_text(encoding="utf-8")
+        self.assertIn("PROJECT-LOCAL TRACE GRAPH", page)
+        self.assertIn('id="record-IDEA-DASH-A"', page)
+        self.assertIn('href="#record-IDEA-DASH-A"', page)
+        self.assertIn("derived_from", page)
+        self.assertIn("2 nodes", page)
+        self.assertIn("1 edges", page)
 
     def test_dashboard_shows_candidate_selection_and_exact_gate_bound_revision(self) -> None:
         approved = self.approve_gate("idea_freeze", selected_id="IDEA-003")

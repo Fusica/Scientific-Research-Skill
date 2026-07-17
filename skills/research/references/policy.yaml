@@ -128,6 +128,7 @@
       "approval_requires": [
         "one registered idea portfolio whose current revision marks exactly one falsifiable candidate as selected and preserves all other candidates with stable IDs and dispositions",
         "candidate dispositions use only active, shortlisted, selected, rejected, or falsified and include parent lineage, supporting and opposing evidence, kill criteria, and selection or rejection reasons",
+        "declared exploration budget, at least three seed-generation passes with recorded isolation status, typed variation and multi-parent lineage, position-swapped pairwise comparison, three-lens adversarial review, repair or failure feedback, selector limitations, and preservation of duplicate, rejected, falsified, and budget-exhausted work",
         "closest-work evidence and smallest defensible difference",
         "feasibility, risks, predictions, and kill criteria",
         "human review confirms the selected ID matches the selected candidate inside the portfolio because runtime does not parse scientific Markdown",
@@ -245,9 +246,9 @@
       },
       "approval_requires": [
         "release artifact revision snapshots and content hashes",
-        "declared source, build, and bibliography toolchain completed with retained logs",
-        "all promised checks completed and rendered output visually inspected",
-        "claim, citation, anonymization, and cross-document consistency verified",
+        "declared source, clean isolated build, bibliography toolchain, and source-cited Venue Profile completed with retained argument vectors, working directory, tool versions, logs, and content hashes",
+        "mechanical, researcher-review, and venue-fact checks are classified; all applicable promised checks are completed, blocking failures are resolved, every warning has an explicit disposition, and rendered output is visually inspected",
+        "claim, number, citation, anonymization, reviewer-response, manuscript-diff, exact package, and cross-document consistency verified as applicable to the named release target",
         "explicit human approval for the named release target"
       ],
       "reopen_when_changed": [

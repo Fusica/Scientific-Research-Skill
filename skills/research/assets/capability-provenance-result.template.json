@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "evidence_class": "deterministic",
+  "reference_kind": "command_ref",
+  "passed": true,
+  "scenario_ids": [
+    "replace-with-frozen-scenario-id"
+  ],
+  "finding": "Describe the retained observation represented by this provenance record."
+}

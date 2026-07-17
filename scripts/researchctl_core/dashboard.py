@@ -15,8 +15,10 @@ from .constants import DASHBOARD_RELATIVE_PATH, Policy, ResearchCtlError
 from .doctor import validate_state
 from .gate_records import gate_record, iter_gate_records
 from .gates import required_artifact_roles_for_gate
+from .records import inspect_record_manifests
 from .store import load_state, require_compatible_state
 from .timeutils import utc_now
+from .trace import build_trace_summary
 
 
 def _escape(value: Any) -> str:
@@ -528,6 +530,81 @@ def _render_timeline(
     )
 
 
+def _render_trace(root: Path, state: dict[str, Any], policy: Policy) -> str:
+    inspection = inspect_record_manifests(root, state, policy)
+    summary = build_trace_summary(inspection)
+    outgoing: dict[str, list[dict[str, str]]] = {}
+    incoming: dict[str, list[dict[str, str]]] = {}
+    for edge in inspection.edges:
+        outgoing.setdefault(edge["source_id"], []).append(edge)
+        incoming.setdefault(edge["target_id"], []).append(edge)
+
+    cards: list[str] = []
+    for node in inspection.nodes:
+        record_id = str(node.get("record_id", "<missing>"))
+        source = node.get("source")
+        source = source if isinstance(source, dict) else {}
+        outgoing_items = "".join(
+            '<li><code>{relation}</code> → '
+            '<a href="#record-{target}">{target}</a></li>'.format(
+                relation=_escape(edge["relation"]),
+                target=_escape(edge["target_id"]),
+            )
+            for edge in outgoing.get(record_id, [])
+        )
+        incoming_items = "".join(
+            '<li><a href="#record-{source}">{source}</a> → '
+            '<code>{relation}</code></li>'.format(
+                source=_escape(edge["source_id"]),
+                relation=_escape(edge["relation"]),
+            )
+            for edge in incoming.get(record_id, [])
+        )
+        cards.append(
+            '<article class="trace-card" id="record-{record_id}">'
+            '<div class="artifact-title"><div><code>{kind}</code>'
+            '<h3>{record_id}</h3></div><span class="badge neutral">{stage}</span></div>'
+            '<p>source <code>{role}.{artifact_id} r{revision}{locator}</code></p>'
+            '<h4>Outgoing</h4><ul>{outgoing}</ul>'
+            '<h4>Incoming</h4><ul>{incoming}</ul></article>'.format(
+                record_id=_escape(record_id),
+                kind=_escape(node.get("record_kind", "<missing>")),
+                stage=_escape(node.get("stage", "<missing>")),
+                role=_escape(source.get("artifact_role", "<missing>")),
+                artifact_id=_escape(source.get("artifact_id", "<missing>")),
+                revision=_escape(source.get("revision", "?")),
+                locator=_escape(source.get("locator", "")),
+                outgoing=outgoing_items or '<li class="empty">无</li>',
+                incoming=incoming_items or '<li class="empty">无</li>',
+            )
+        )
+    warning_items = "".join(
+        f'<li class="warning">{_escape(message)}</li>'
+        for message in inspection.warnings
+    )
+    error_items = "".join(
+        f'<li class="error">{_escape(message)}</li>' for message in inspection.errors
+    )
+    diagnostics = ""
+    if warning_items or error_items:
+        diagnostics = (
+            "<details><summary>Trace diagnostics "
+            f"({len(inspection.errors)} errors, {len(inspection.warnings)} warnings)"
+            f"</summary><ul>{error_items}{warning_items}</ul></details>"
+        )
+    empty_state = "" if cards else '<p class="empty">尚无类型化科研记录。</p>'
+    return (
+        '<section class="panel"><p class="eyebrow">PROJECT-LOCAL TRACE GRAPH</p>'
+        '<h2>科研记录的正向与反向追踪</h2>'
+        '<p>这是从已登记 record manifest 临时重建的只读投影；浏览器查找可按 ID '
+        '定位，关系声明不等于科研判断已被证明。</p>'
+        f'<p><span class="badge neutral">{summary["node_count"]} nodes</span> '
+        f'<span class="badge neutral">{summary["edge_count"]} edges</span></p>'
+        f'{diagnostics}<div class="trace-grid">{"".join(cards)}</div>{empty_state}'
+        '</section>'
+    )
+
+
 def _document(
     root: Path,
     state: dict[str, Any],
@@ -541,7 +618,7 @@ def _document(
     generated = utc_now()
     css = """
 :root{color-scheme:dark;--bg:#08111f;--panel:#111d2e;--line:#2b3d55;--text:#edf4ff;--muted:#9bb0c9;--accent:#69d2b0;--warn:#ffc66d;--bad:#ff7f87}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}main{max-width:1240px;margin:auto;padding:28px}.hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:18px}.hero{display:flex;justify-content:space-between;gap:20px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:.12em}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:12px}.clean,.approved,.selected,.bound{color:var(--accent)}.dirty,.reopened,.warning{color:var(--warn)}.missing,.error{color:var(--bad)}.stage-flow,.gate-grid,.artifact-grid{display:grid;gap:12px}.stage-flow{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));padding:0}.stage-flow li,.artifact-card,.gate-card{list-style:none;border:1px solid var(--line);border-radius:12px;padding:14px}.stage-flow .current{outline:2px solid var(--accent)}.stage-flow small,.gate-title small,.timeline small{display:block;color:var(--muted)}.artifact-grid,.gate-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-title,.gate-title{display:flex;justify-content:space-between;gap:10px}.path,code{overflow-wrap:anywhere;color:#b9d5ff}.timeline{padding-left:20px}.timeline li{margin:8px 0}.timeline time{display:block;color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:800px){main{padding:12px}.hero{display:block}.stage-flow,.artifact-grid,.gate-grid{grid-template-columns:1fr}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}main{max-width:1240px;margin:auto;padding:28px}.hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:18px}.hero{display:flex;justify-content:space-between;gap:20px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:.12em}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:12px}.clean,.approved,.selected,.bound{color:var(--accent)}.dirty,.reopened,.warning{color:var(--warn)}.missing,.error{color:var(--bad)}.stage-flow,.gate-grid,.artifact-grid,.trace-grid{display:grid;gap:12px}.stage-flow{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));padding:0}.stage-flow li,.artifact-card,.gate-card,.trace-card{list-style:none;border:1px solid var(--line);border-radius:12px;padding:14px}.stage-flow .current{outline:2px solid var(--accent)}.stage-flow small,.gate-title small,.timeline small{display:block;color:var(--muted)}.artifact-grid,.gate-grid,.trace-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-title,.gate-title{display:flex;justify-content:space-between;gap:10px}.path,code{overflow-wrap:anywhere;color:#b9d5ff}a{color:#8cc8ff}.timeline{padding-left:20px}.timeline li{margin:8px 0}.timeline time{display:block;color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:800px){main{padding:12px}.hero{display:block}.stage-flow,.artifact-grid,.gate-grid,.trace-grid{grid-template-columns:1fr}}
 """
     return "".join(
         [
@@ -561,6 +638,7 @@ def _document(
             _render_stages(state, policy),
             _render_artifacts(artifacts, bindings),
             _render_gates(state, policy, artifacts),
+            _render_trace(root, state, policy),
             _render_timeline(state, policy, artifacts),
             "</main></body></html>",
         ]

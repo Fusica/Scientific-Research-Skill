@@ -6,7 +6,17 @@ import os
 import subprocess
 import sys
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest import mock
+
+from scripts.researchctl_core.manifest_commands import cmd_record_append
+from scripts.researchctl_core import manifest_commands as manifest_commands_module
+from scripts.researchctl_core.policy import load_policy
+from scripts.researchctl_core import publish as publish_module
+from scripts.researchctl_core.constants import ResearchCtlError
+from scripts.researchctl_core.publish import cmd_publish_batch
+from scripts.researchctl_core.store import state_mutation_lock
 
 try:
     from .research_test_support import RESEARCHCTL, ResearchProjectTestCase
@@ -15,6 +25,23 @@ except ImportError:  # unittest discover -s tests
 
 
 class ResearchCtlV2Test(ResearchProjectTestCase):
+    def publication_item(
+        self,
+        source: Path,
+        publish_path: str,
+        role: str,
+        artifact_id: str,
+    ) -> dict[str, object]:
+        content_hash, size_bytes = publish_module.hash_file_with_size(source)
+        return {
+            "source_path": str(source),
+            "publish_path": publish_path,
+            "role": role,
+            "artifact_id": artifact_id,
+            "expected_content_hash": content_hash,
+            "expected_size_bytes": size_bytes,
+        }
+
     def artifact_ref(
         self, role_reference: str, artifact_id: str
     ) -> dict[str, object]:
@@ -208,6 +235,559 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
         self.assertIn("state already exists; left unchanged", again.stdout)
         exclude = (self.project / ".git/info/exclude").read_text(encoding="utf-8")
         self.assertEqual(exclude.count(".research/"), 1)
+
+    def test_artifact_publish_batch_rejects_all_items_before_any_publish(self) -> None:
+        _existing_id, _existing_path, registered = self.register(
+            "idea.batch_conflict",
+            "BATCH-CONFLICT-EXISTING",
+            content="existing canonical artifact\n",
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        source_one = self.project / "batch-source-one.txt"
+        source_two = self.project / "batch-source-two.txt"
+        source_one.write_text("first\n", encoding="utf-8")
+        source_two.write_text("second\n", encoding="utf-8")
+        destination_one = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-001/first.txt"
+        )
+        destination_two = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-001/second.txt"
+        )
+        manifest_path = self.project / "batch-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            source_one,
+                            destination_one,
+                            "batch_output",
+                            "BATCH-OUTPUT-001",
+                        ),
+                        self.publication_item(
+                            source_two,
+                            destination_two,
+                            "batch_conflict",
+                            "BATCH-CONFLICT-DIFFERENT",
+                        ),
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state_before = self.state_path.read_bytes()
+
+        result = self.run_ctl(
+            "artifact",
+            "publish-batch",
+            "--stage",
+            "idea",
+            "--attempt-id",
+            "ATTEMPT-001",
+            "--manifest",
+            str(manifest_path),
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("one canonical artifact", result.stderr)
+        self.assertFalse((self.project / destination_one).exists())
+        self.assertFalse((self.project / destination_two).exists())
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_artifact_publish_batch_is_no_clobber_and_idempotent(self) -> None:
+        source = self.project / "batch-source.txt"
+        source.write_text("batch payload\n", encoding="utf-8")
+        destination = ".research/artifacts/idea/reference-stack/ATTEMPT-OK/output.txt"
+        manifest_path = self.project / "batch-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            source,
+                            destination,
+                            "batch_output",
+                            "BATCH-OUTPUT-001",
+                        )
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        first = self.run_ctl(
+            "artifact",
+            "publish-batch",
+            "--stage",
+            "idea",
+            "--attempt-id",
+            "ATTEMPT-OK",
+            "--manifest",
+            str(manifest_path),
+            "--json",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["publications"][0]["result"], "registered")
+        self.assertEqual((self.project / destination).read_text(), "batch payload\n")
+        entry = self.artifact_entry("idea.batch_output", "BATCH-OUTPUT-001")
+        self.assertEqual(entry["current_revision"], 1)
+        state_after_first = self.state_path.read_bytes()
+
+        second = self.run_ctl(
+            "artifact",
+            "publish-batch",
+            "--stage",
+            "idea",
+            "--attempt-id",
+            "ATTEMPT-OK",
+            "--manifest",
+            str(manifest_path),
+            "--json",
+        )
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(
+            json.loads(second.stdout)["publications"][0]["result"],
+            "already_registered",
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_after_first)
+
+    def test_artifact_publish_batch_leaves_only_unregistered_attempt_orphans_on_partial_failure(
+        self,
+    ) -> None:
+        sources = [self.project / "batch-one.txt", self.project / "batch-two.txt"]
+        sources[0].write_text("one\n", encoding="utf-8")
+        sources[1].write_text("two\n", encoding="utf-8")
+        destinations = [
+            ".research/artifacts/idea/reference-stack/ATTEMPT-ROLLBACK/one.txt",
+            ".research/artifacts/idea/reference-stack/ATTEMPT-ROLLBACK/two.txt",
+        ]
+        manifest_path = self.project / "batch-rollback.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            sources[index],
+                            destinations[index],
+                            f"batch_output_{index + 1}",
+                            f"BATCH-ROLLBACK-{index + 1}",
+                        )
+                        for index in range(2)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state_before = self.state_path.read_bytes()
+        snapshots_before = {
+            path.relative_to(self.project).as_posix()
+            for path in (self.project / ".research/snapshots").rglob("*")
+            if path.is_file()
+        }
+        original_copy = publish_module._copy_to_destination
+        calls = 0
+
+        def fail_second(
+            root: Path, publication: publish_module.Publication
+        ) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ResearchCtlError("injected second publication failure")
+            original_copy(root, publication)
+
+        with (
+            mock.patch.object(
+                publish_module, "_copy_to_destination", side_effect=fail_second
+            ),
+            self.assertRaisesRegex(
+                ResearchCtlError, "injected second publication failure"
+            ),
+        ):
+            cmd_publish_batch(
+                self.project,
+                load_policy(),
+                Namespace(
+                    stage="idea",
+                    attempt_id="ATTEMPT-ROLLBACK",
+                    manifest=str(manifest_path),
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+        self.assertEqual((self.project / destinations[0]).read_text(), "one\n")
+        self.assertFalse((self.project / destinations[1]).exists())
+        snapshots_after = {
+            path.relative_to(self.project).as_posix()
+            for path in (self.project / ".research/snapshots").rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(snapshots_after, snapshots_before)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO creation is POSIX-only")
+    def test_artifact_publish_batch_rejects_a_fifo_manifest_without_blocking(
+        self,
+    ) -> None:
+        fifo = self.project / "publication-manifest.fifo"
+        os.mkfifo(fifo)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(RESEARCHCTL),
+                "artifact",
+                "publish-batch",
+                "--stage",
+                "idea",
+                "--attempt-id",
+                "ATTEMPT-FIFO-MANIFEST",
+                "--manifest",
+                str(fifo),
+            ],
+            cwd=self.project,
+            env=self.environment(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("regular file", result.stderr)
+
+    def test_artifact_publish_batch_preserves_commit_when_state_writer_raises_after_replace(
+        self,
+    ) -> None:
+        source = self.project / "batch-commit-source.txt"
+        source.write_text("committed payload\n", encoding="utf-8")
+        destination = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-COMMIT/output.txt"
+        )
+        manifest_path = self.project / "batch-commit-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            source,
+                            destination,
+                            "batch_commit_output",
+                            "BATCH-COMMIT-001",
+                        )
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_writer = publish_module.write_mutated_state
+
+        def commit_then_interrupt(root: Path, state: dict[str, object]) -> None:
+            original_writer(root, state)
+            raise KeyboardInterrupt("injected post-commit interrupt")
+
+        with (
+            mock.patch.object(
+                publish_module,
+                "write_mutated_state",
+                side_effect=commit_then_interrupt,
+            ),
+            self.assertRaisesRegex(KeyboardInterrupt, "post-commit"),
+        ):
+            cmd_publish_batch(
+                self.project,
+                load_policy(),
+                Namespace(
+                    stage="idea",
+                    attempt_id="ATTEMPT-COMMIT",
+                    manifest=str(manifest_path),
+                    json=True,
+                ),
+            )
+
+        self.assertEqual((self.project / destination).read_text(), "committed payload\n")
+        revision = self.artifact_entry(
+            "idea.batch_commit_output", "BATCH-COMMIT-001"
+        )["revisions"][0]
+        self.assertTrue((self.project / revision["snapshot_path"]).is_file())
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_artifact_publish_batch_retains_unregistered_revision_two_orphans_before_state_replace(
+        self,
+    ) -> None:
+        source = self.project / "batch-r2-source.txt"
+        source.write_text("revision one\n", encoding="utf-8")
+
+        def manifest(attempt: str, destination: str) -> Path:
+            path = self.project / f"batch-{attempt}.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "publications": [
+                            self.publication_item(
+                                source,
+                                destination,
+                                "batch_revisioned_output",
+                                "BATCH-REVISIONED-001",
+                            )
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return path
+
+        first_destination = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-R1/output.txt"
+        )
+        first_manifest = manifest("ATTEMPT-R1", first_destination)
+        first = self.run_ctl(
+            "artifact",
+            "publish-batch",
+            "--stage",
+            "idea",
+            "--attempt-id",
+            "ATTEMPT-R1",
+            "--manifest",
+            str(first_manifest),
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        baseline_state = self.state_path.read_bytes()
+        baseline_snapshots = {
+            path.relative_to(self.project).as_posix()
+            for path in (self.project / ".research/snapshots").rglob("*")
+            if path.is_file()
+        }
+
+        source.write_text("revision two\n", encoding="utf-8")
+        second_destination = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-R2/output.txt"
+        )
+        second_manifest = manifest("ATTEMPT-R2", second_destination)
+        with (
+            mock.patch.object(
+                publish_module,
+                "write_mutated_state",
+                side_effect=ResearchCtlError("injected pre-replace failure"),
+            ),
+            self.assertRaisesRegex(ResearchCtlError, "pre-replace failure"),
+        ):
+            cmd_publish_batch(
+                self.project,
+                load_policy(),
+                Namespace(
+                    stage="idea",
+                    attempt_id="ATTEMPT-R2",
+                    manifest=str(second_manifest),
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(self.state_path.read_bytes(), baseline_state)
+        self.assertEqual(
+            (self.project / second_destination).read_text(), "revision two\n"
+        )
+        snapshots_after = {
+            path.relative_to(self.project).as_posix()
+            for path in (self.project / ".research/snapshots").rglob("*")
+            if path.is_file()
+        }
+        self.assertTrue(baseline_snapshots < snapshots_after)
+        self.assertEqual(len(snapshots_after), len(baseline_snapshots) + 1)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_artifact_publish_batch_does_not_remove_a_matching_snapshot_it_did_not_create(
+        self,
+    ) -> None:
+        source = self.project / "batch-snapshot-race.txt"
+        source.write_text("matching snapshot\n", encoding="utf-8")
+        destination = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-SNAPSHOT-RACE/output.txt"
+        )
+        manifest_path = self.project / "batch-snapshot-race.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            source,
+                            destination,
+                            "batch_snapshot_race",
+                            "BATCH-SNAPSHOT-RACE-001",
+                        )
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_snapshot = publish_module.create_revision_snapshot_result
+        retained_snapshot: Path | None = None
+        state_before = self.state_path.read_bytes()
+
+        def competing_snapshot(*args: object, **kwargs: object):
+            nonlocal retained_snapshot
+            result = original_snapshot(*args, **kwargs)
+            retained_snapshot = self.project / result.stored_path
+            return type(result)(
+                stored_path=result.stored_path,
+                created=False,
+                identity=None,
+            )
+
+        with (
+            mock.patch.object(
+                publish_module,
+                "create_revision_snapshot_result",
+                side_effect=competing_snapshot,
+            ),
+            mock.patch.object(
+                publish_module,
+                "write_mutated_state",
+                side_effect=ResearchCtlError("injected pre-state failure"),
+            ),
+            self.assertRaisesRegex(ResearchCtlError, "injected pre-state failure"),
+        ):
+            cmd_publish_batch(
+                self.project,
+                load_policy(),
+                Namespace(
+                    stage="idea",
+                    attempt_id="ATTEMPT-SNAPSHOT-RACE",
+                    manifest=str(manifest_path),
+                    json=True,
+                ),
+            )
+
+        self.assertIsNotNone(retained_snapshot)
+        assert retained_snapshot is not None
+        self.assertEqual(retained_snapshot.read_text(), "matching snapshot\n")
+        self.assertEqual((self.project / destination).read_text(), "matching snapshot\n")
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    @unittest.skipIf(sys.platform == "win32", "symlink semantics differ on Windows")
+    def test_artifact_publish_batch_rejects_a_symlinked_source_parent(self) -> None:
+        real_parent = self.project / "real-source-parent"
+        real_parent.mkdir()
+        source = real_parent / "output.txt"
+        source.write_text("must not publish\n", encoding="utf-8")
+        linked_parent = self.project / "linked-source-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        destination = (
+            ".research/artifacts/idea/reference-stack/ATTEMPT-SOURCE-LINK/output.txt"
+        )
+        manifest_path = self.project / "batch-source-link.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "publications": [
+                        self.publication_item(
+                            linked_parent / "output.txt",
+                            destination,
+                            "batch_source_link",
+                            "BATCH-SOURCE-LINK-001",
+                        )
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = self.state_path.read_bytes()
+
+        result = self.run_ctl(
+            "artifact",
+            "publish-batch",
+            "--stage",
+            "idea",
+            "--attempt-id",
+            "ATTEMPT-SOURCE-LINK",
+            "--manifest",
+            str(manifest_path),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot traverse a symlink", result.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse((self.project / destination).exists())
+
+    @unittest.skipIf(sys.platform == "win32", "dir_fd semantics differ on Windows")
+    def test_direct_publication_never_adopts_or_removes_a_replacement_file(
+        self,
+    ) -> None:
+        source_path = self.project / "publication-identity-source.txt"
+        source_path.write_text("owned publication\n", encoding="utf-8")
+        source, source_identity, source_parents = publish_module._source_path(
+            self.project, str(source_path)
+        )
+        content_hash, size_bytes = publish_module.hash_file_with_size(source)
+        destination = self.project / (
+            ".research/artifacts/idea/reference-stack/"
+            "ATTEMPT-IDENTITY-RACE/output.txt"
+        )
+        publication = publish_module.Publication(
+            source=source,
+            source_identity=source_identity,
+            source_parent_identities=source_parents,
+            publish_path=destination.relative_to(self.project).as_posix(),
+            destination=destination,
+            role="identity_race_output",
+            artifact_id="IDENTITY-RACE-OUTPUT-001",
+            content_hash=content_hash,
+            size_bytes=size_bytes,
+            existing_revision=None,
+            entry=None,
+            next_revision=1,
+        )
+        original_verify = publish_module._verify_source_topology
+        calls = 0
+
+        def replace_after_copy(item: publish_module.Publication) -> None:
+            nonlocal calls
+            original_verify(item)
+            calls += 1
+            if calls == 2:
+                item.destination.unlink()
+                item.destination.write_text(
+                    "unrelated replacement\n", encoding="utf-8"
+                )
+
+        try:
+            with (
+                mock.patch.object(
+                    publish_module,
+                    "_verify_source_topology",
+                    side_effect=replace_after_copy,
+                ),
+                self.assertRaisesRegex(ResearchCtlError, "identity changed"),
+            ):
+                publish_module._copy_to_destination(self.project, publication)
+        finally:
+            publish_module._cleanup([publication])
+
+        self.assertEqual(
+            destination.read_text(encoding="utf-8"), "unrelated replacement\n"
+        )
 
     def test_adapter_request_is_registered_then_verified_without_adapter_state(
         self,
@@ -1144,6 +1724,499 @@ class ResearchCtlV2Test(ResearchProjectTestCase):
                 "current_revision"
             ],
             2,
+        )
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO creation is POSIX-only")
+    def test_manifest_append_rejects_fifo_item_and_target_without_blocking(
+        self,
+    ) -> None:
+        item_fifo = self.project / "record-item.fifo"
+        os.mkfifo(item_fifo)
+        item_target = self.project / "work/idea/fifo-item-manifest.json"
+        item_result = subprocess.run(
+            [
+                sys.executable,
+                str(RESEARCHCTL),
+                "record",
+                "append",
+                "--stage",
+                "idea",
+                "--path",
+                str(item_target),
+                "--artifact-id",
+                "FIFO-ITEM-MANIFEST",
+                "--record",
+                str(item_fifo),
+            ],
+            cwd=self.project,
+            env=self.environment(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        self.assertEqual(item_result.returncode, 2, item_result.stderr)
+        self.assertIn("regular file", item_result.stderr)
+
+        target_fifo = self.project / "work/idea/record-target.fifo"
+        target_fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(target_fifo)
+        record = self.project / "record-item.json"
+        record.write_text("{}\n", encoding="utf-8")
+        target_result = subprocess.run(
+            [
+                sys.executable,
+                str(RESEARCHCTL),
+                "record",
+                "append",
+                "--stage",
+                "idea",
+                "--path",
+                str(target_fifo),
+                "--artifact-id",
+                "FIFO-TARGET-MANIFEST",
+                "--record",
+                str(record),
+            ],
+            cwd=self.project,
+            env=self.environment(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        self.assertEqual(target_result.returncode, 2, target_result.stderr)
+        self.assertIn("regular file", target_result.stderr)
+
+    def test_manifest_append_failure_never_removes_or_restores_a_replacement(
+        self,
+    ) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-MANIFEST-CLEANUP-SOURCE"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        source_ref = self.artifact_ref("idea.idea_card", source_id)
+
+        def write_record(path: Path, record_id: str) -> None:
+            path.write_text(
+                json.dumps(
+                    {
+                        "record_id": record_id,
+                        "record_kind": "candidate",
+                        "source": {
+                            "artifact_role": "idea_card",
+                            "artifact_id": source_id,
+                            "revision": source_ref["revision"],
+                            "locator": f"#{record_id.lower()}",
+                        },
+                        "supersedes": None,
+                        "relations": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        new_target = self.project / "work/idea/new-cleanup-manifest.json"
+        new_item = self.project / "work/idea/new-cleanup-record.json"
+        write_record(new_item, "IDEA-CLEANUP-NEW-001")
+        new_arguments = Namespace(
+            stage="idea",
+            path=str(new_target),
+            artifact_id="IDEA-CLEANUP-NEW",
+            record=str(new_item),
+            json=True,
+            record_action="append",
+        )
+        state_before_new = self.state_path.read_bytes()
+
+        def replace_new_then_fail(*_args: object, **_kwargs: object) -> int:
+            new_target.unlink()
+            new_target.write_text("unrelated new replacement\n", encoding="utf-8")
+            raise ResearchCtlError("injected new-target registration failure")
+
+        with (
+            state_mutation_lock(self.project, create=False),
+            mock.patch.object(
+                manifest_commands_module,
+                "cmd_artifact",
+                side_effect=replace_new_then_fail,
+            ),
+            self.assertRaisesRegex(ResearchCtlError, "new-target"),
+        ):
+            cmd_record_append(self.project, load_policy(), new_arguments)
+
+        self.assertEqual(
+            new_target.read_text(encoding="utf-8"),
+            "unrelated new replacement\n",
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before_new)
+
+        existing_target = self.project / "work/idea/existing-cleanup-manifest.json"
+        first_item = self.project / "work/idea/existing-cleanup-record-1.json"
+        write_record(first_item, "IDEA-CLEANUP-EXISTING-001")
+        first = self.run_ctl(
+            "record",
+            "append",
+            "--stage",
+            "idea",
+            "--path",
+            str(existing_target),
+            "--artifact-id",
+            "IDEA-CLEANUP-EXISTING",
+            "--record",
+            str(first_item),
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second_item = self.project / "work/idea/existing-cleanup-record-2.json"
+        write_record(second_item, "IDEA-CLEANUP-EXISTING-002")
+        existing_arguments = Namespace(
+            stage="idea",
+            path=str(existing_target),
+            artifact_id="IDEA-CLEANUP-EXISTING",
+            record=str(second_item),
+            json=True,
+            record_action="append",
+        )
+        state_before_existing = self.state_path.read_bytes()
+
+        def replace_existing_then_fail(*_args: object, **_kwargs: object) -> int:
+            existing_target.unlink()
+            existing_target.write_text(
+                "unrelated existing replacement\n", encoding="utf-8"
+            )
+            raise ResearchCtlError("injected existing-target registration failure")
+
+        with (
+            state_mutation_lock(self.project, create=False),
+            mock.patch.object(
+                manifest_commands_module,
+                "cmd_artifact",
+                side_effect=replace_existing_then_fail,
+            ),
+            self.assertRaisesRegex(ResearchCtlError, "existing-target"),
+        ):
+            cmd_record_append(self.project, load_policy(), existing_arguments)
+
+        self.assertEqual(
+            existing_target.read_text(encoding="utf-8"),
+            "unrelated existing replacement\n",
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before_existing)
+
+    def test_record_append_atomically_registers_manifest_revisions(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-ATOMIC-APPEND"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        source_ref = self.artifact_ref("idea.idea_card", source_id)
+        manifest_path = self.project / "work/idea/atomic-records.json"
+        first_item = self.project / "work/idea/record-001.json"
+        first_item.write_text(
+            json.dumps(
+                {
+                    "record_id": "IDEA-ATOMIC-001",
+                    "record_kind": "candidate",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": source_id,
+                        "revision": source_ref["revision"],
+                        "locator": "#idea-atomic-001",
+                    },
+                    "supersedes": None,
+                    "relations": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        first = self.run_ctl(
+            "record",
+            "append",
+            "--stage",
+            "idea",
+            "--path",
+            str(manifest_path),
+            "--artifact-id",
+            "IDEA-RECORDS-ATOMIC",
+            "--record",
+            str(first_item),
+            "--json",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_result = json.loads(first.stdout)
+        self.assertEqual(first_result["result"], "registered")
+        self.assertEqual(first_result["artifact"]["revision"], 1)
+        self.assertEqual(
+            first_result["artifact_ref"]["label"],
+            "artifacts.idea.record_manifest.IDEA-RECORDS-ATOMIC",
+        )
+        first_bytes = manifest_path.read_bytes()
+
+        second_item = self.project / "work/idea/record-002.json"
+        second_item.write_text(
+            json.dumps(
+                {
+                    "record_id": "IDEA-ATOMIC-002",
+                    "record_kind": "candidate",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": source_id,
+                        "revision": source_ref["revision"],
+                        "locator": "#idea-atomic-002",
+                    },
+                    "supersedes": None,
+                    "relations": [
+                        {
+                            "relation": "derived_from",
+                            "target_id": "IDEA-ATOMIC-001",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        second = self.run_ctl(
+            "record",
+            "append",
+            "--stage",
+            "idea",
+            "--path",
+            str(manifest_path),
+            "--artifact-id",
+            "IDEA-RECORDS-ATOMIC",
+            "--record",
+            str(second_item),
+            "--json",
+        )
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        second_result = json.loads(second.stdout)
+        self.assertEqual(second_result["artifact"]["revision"], 2)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [record["record_id"] for record in manifest["records"]],
+            ["IDEA-ATOMIC-001", "IDEA-ATOMIC-002"],
+        )
+        entry = self.artifact_entry("idea.record_manifest", "IDEA-RECORDS-ATOMIC")
+        first_snapshot = self.project / entry["revisions"][0]["snapshot_path"]
+        self.assertEqual(first_snapshot.read_bytes(), first_bytes)
+
+    def test_manifest_append_preserves_committed_source_after_output_failure(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-POST-COMMIT"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        source_ref = self.artifact_ref("idea.idea_card", source_id)
+        manifest_path = self.project / "work/idea/post-commit-records.json"
+        item_path = self.project / "work/idea/post-commit-record.json"
+        item_path.write_text(
+            json.dumps(
+                {
+                    "record_id": "IDEA-POST-COMMIT-001",
+                    "record_kind": "candidate",
+                    "source": {
+                        "artifact_role": "idea_card",
+                        "artifact_id": source_id,
+                        "revision": source_ref["revision"],
+                        "locator": "#idea-post-commit-001",
+                    },
+                    "supersedes": None,
+                    "relations": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        arguments = Namespace(
+            stage="idea",
+            path=str(manifest_path),
+            artifact_id="IDEA-RECORDS-POST-COMMIT",
+            record=str(item_path),
+            json=True,
+            record_action="append",
+        )
+
+        with (
+            state_mutation_lock(self.project, create=False),
+            mock.patch(
+                "scripts.researchctl_core.commands._emit_artifact_result",
+                side_effect=BrokenPipeError("consumer closed stdout"),
+            ),
+            self.assertRaises(BrokenPipeError),
+        ):
+            cmd_record_append(self.project, load_policy(), arguments)
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [record["record_id"] for record in manifest["records"]],
+            ["IDEA-POST-COMMIT-001"],
+        )
+        entry = self.artifact_entry(
+            "idea.record_manifest", "IDEA-RECORDS-POST-COMMIT"
+        )
+        self.assertEqual(entry["current_revision"], 1)
+        snapshot = self.project / entry["revisions"][0]["snapshot_path"]
+        self.assertEqual(snapshot.read_bytes(), manifest_path.read_bytes())
+
+    def test_adapter_append_registers_request_and_accepted_receipt(self) -> None:
+        self.assertEqual(self.approve_gate("idea_freeze").returncode, 0)
+        self.assertEqual(
+            self.approve_gate("method_experiment_approval").returncode, 0
+        )
+        payload_id, _payload, registered = self.register(
+            "experiment_results.experiment_request",
+            "EXPERIMENT-REQUEST-ATOMIC",
+            content='{"command":["python3","train.py"]}\n',
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        request = self.adapter_request(
+            request_id="REQUEST-EXPERIMENT-ATOMIC",
+            operation_kind="experiment_execution",
+            payload_ref=self.artifact_ref(
+                "experiment_results.experiment_request", payload_id
+            ),
+            gate_binding=self.gate_binding("method_experiment_approval"),
+            effect_class="costly_compute",
+        )
+        exchange_path = self.project / "work/experiment_results/atomic-exchange.json"
+        request_path = self.project / "work/experiment_results/request.json"
+        request_path.write_text(
+            json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        appended_request = self.run_ctl(
+            "adapter",
+            "request-append",
+            "--stage",
+            "experiment_results",
+            "--path",
+            str(exchange_path),
+            "--artifact-id",
+            "EXPERIMENT-ADAPTER-ATOMIC",
+            "--request",
+            str(request_path),
+            "--json",
+        )
+        self.assertEqual(appended_request.returncode, 0, appended_request.stderr)
+        self.assertEqual(
+            json.loads(appended_request.stdout)["artifact"]["revision"], 1
+        )
+
+        verified = self.run_ctl(
+            "adapter",
+            "verify",
+            request["request_id"],
+            "--attempt-id",
+            "ATTEMPT-EXPERIMENT-ATOMIC",
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        request_hash = json.loads(verified.stdout)["request_hash"]
+        receipt = self.adapter_receipt(
+            receipt_id="RECEIPT-EXPERIMENT-ATOMIC-ACCEPTED",
+            request=request,
+            request_hash=request_hash,
+            attempt_id="ATTEMPT-EXPERIMENT-ATOMIC",
+            status="accepted",
+            message="Attempt journal persisted before external execution.",
+        )
+        receipt_path = self.project / "work/experiment_results/receipt.json"
+        receipt_path.write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        appended_receipt = self.run_ctl(
+            "adapter",
+            "receipt-append",
+            "--stage",
+            "experiment_results",
+            "--path",
+            str(exchange_path),
+            "--artifact-id",
+            "EXPERIMENT-ADAPTER-ATOMIC",
+            "--receipt",
+            str(receipt_path),
+            "--json",
+        )
+
+        self.assertEqual(appended_receipt.returncode, 0, appended_receipt.stderr)
+        self.assertEqual(
+            json.loads(appended_receipt.stdout)["artifact"]["revision"], 2
+        )
+        exchange = json.loads(exchange_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(exchange["requests"]), 1)
+        self.assertEqual(len(exchange["receipts"]), 1)
+        doctor = self.run_ctl("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_artifact_append_rejects_semantically_valid_tampered_history(self) -> None:
+        source_id, _source, registered_source = self.register(
+            "idea.idea_card", "IDEA-PORTFOLIO-TAMPERED-HISTORY"
+        )
+        self.assertEqual(registered_source.returncode, 0, registered_source.stderr)
+        manifest = self.record_manifest(
+            stage="idea",
+            source_role="idea_card",
+            source_artifact_id=source_id,
+            records=[{"record_id": "IDEA-TAMPER-001", "record_kind": "candidate"}],
+        )
+        manifest_path = self.project / "work/idea/tampered-history.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        manifest_id, _path, first = self.register(
+            "idea.record_manifest", "IDEA-RECORDS-TAMPERED", path=manifest_path
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        entry = self.artifact_entry("idea.record_manifest", manifest_id)
+        historical_snapshot = self.project / entry["revisions"][0]["snapshot_path"]
+        forged_prefix = json.loads(historical_snapshot.read_text(encoding="utf-8"))
+        forged_prefix["records"][0]["source"]["locator"] = "#forged-but-valid"
+        historical_snapshot.write_text(
+            json.dumps(forged_prefix, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        forged_prefix["records"].append(
+            {
+                "record_id": "IDEA-TAMPER-002",
+                "record_kind": "candidate",
+                "source": dict(forged_prefix["records"][0]["source"]),
+                "supersedes": "IDEA-TAMPER-001",
+                "relations": [
+                    {"relation": "derived_from", "target_id": "IDEA-TAMPER-001"}
+                ],
+            }
+        )
+        manifest_path.write_text(
+            json.dumps(forged_prefix, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        before = self.state_path.read_bytes()
+
+        _identifier, _path, rejected = self.register(
+            "idea.record_manifest", manifest_id, path=manifest_path
+        )
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("snapshot mismatch", rejected.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            self.artifact_entry("idea.record_manifest", manifest_id)[
+                "current_revision"
+            ],
+            1,
         )
 
     def test_record_ids_are_project_unique_and_relations_use_typed_vocabulary(

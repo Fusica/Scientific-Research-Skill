@@ -29,11 +29,21 @@ record IDs, linear correction lineage, relation target resolution, endpoint-kind
 compatibility, and append-only manifest history. Workflow state stores only the
 normal artifact revision pointer; it never copies the record graph.
 
-Orphan detection, general graph-cycle rules, relation completeness, and the
-semantic truth of a declared relation are deliberately not certified here. The
-first three belong to the later project-local Trace Graph decision; truth remains
-Research judgment. A `record_manifest` is optional until the owning policy Gate
-explicitly requires that artifact role.
+The supported `record append` command serializes cooperating `researchctl` writers
+under the state transaction lock. If it writes the working manifest but artifact
+registration then fails, it leaves that dirty source visible for explicit
+reconciliation while canonical state and prior snapshots remain unchanged. It
+does not automatically unlink or restore the path because portable POSIX has no
+inode-conditional delete or replace that could not harm a concurrent replacement.
+The lock is not a filesystem security boundary against non-cooperating same-user
+processes.
+
+This ADR originally deferred orphan and graph-cycle diagnostics. ADR 0008 now
+accepts the project-local Trace Graph boundary: `derived_from` ancestry cycles are
+hard errors, while other relation cycles and structurally orphaned records are
+warnings. Relation completeness and the semantic truth of a declared relation
+remain Research judgment. A `record_manifest` is optional until the owning policy
+Gate explicitly requires that artifact role.
 
 ## Consequences
 

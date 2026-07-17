@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "adapter_kind": "isolated_command",
+  "operation_kind": "experiment_execution",
+  "working_directory": "workspace",
+  "environment": {
+    "inherit": ["PATH"],
+    "set": {
+      "PYTHONHASHSEED": "0"
+    }
+  },
+  "network": "declared_disabled",
+  "materials": [
+    {
+      "artifact_ref": {
+        "label": "artifacts.experiment_results.reference_program.PROGRAM-001",
+        "artifact_id": "PROGRAM-001",
+        "revision": 1,
+        "source_path": "work/experiment_results/program.py",
+        "snapshot_path": ".research/snapshots/experiment_results/reference_program/PROGRAM-001/r000001",
+        "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0,
+        "registered_at": "2000-01-01T00:00:00.000000Z"
+      },
+      "destination": "workspace/program.py"
+    },
+    {
+      "artifact_ref": {
+        "label": "artifacts.idea.idea_portfolio.IDEA-PORTFOLIO-001",
+        "artifact_id": "IDEA-PORTFOLIO-001",
+        "revision": 1,
+        "source_path": "work/idea/idea-portfolio.md",
+        "snapshot_path": ".research/snapshots/idea/idea_portfolio/IDEA-PORTFOLIO-001/r000001",
+        "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0,
+        "registered_at": "2000-01-01T00:00:00.000000Z"
+      },
+      "destination": "workspace/gate-inputs/idea-portfolio.md"
+    }
+  ],
+  "tool_probes": [
+    {
+      "tool_id": "python",
+      "argv": ["python3", "--version"],
+      "timeout_seconds": 30
+    }
+  ],
+  "steps": [
+    {
+      "step_id": "execute",
+      "argv": ["python3", "program.py"],
+      "timeout_seconds": 3600
+    }
+  ],
+  "expected_outputs": [
+    {
+      "source_path": "workspace/output/result.json",
+      "publish_path": ".research/artifacts/experiment_results/reference-stack/ATTEMPT-001/output.json",
+      "role": "reference_output",
+      "artifact_id": "REFERENCE-OUTPUT-001",
+      "classification": "output"
+    }
+  ],
+  "log_artifact": {
+    "publish_path": ".research/artifacts/experiment_results/reference-stack/ATTEMPT-001/execution.log",
+    "role": "reference_execution_log",
+    "artifact_id": "REFERENCE-EXECUTION-LOG-001"
+  },
+  "result_artifact": {
+    "publish_path": ".research/artifacts/experiment_results/reference-stack/ATTEMPT-001/result.json",
+    "role": "reference_execution_result",
+    "artifact_id": "REFERENCE-EXECUTION-RESULT-001"
+  }
+}

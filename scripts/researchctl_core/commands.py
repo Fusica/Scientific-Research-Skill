@@ -24,8 +24,10 @@ from .artifacts import (
     resolved_workspace_roots,
     role_is_bound_by_approved_gate,
     stored_artifact_path,
+    validate_artifact_registry,
     verify_revision_files,
 )
+from .audit_bundle import export_bundle, verify_bundle
 from .constants import (
     ARTIFACT_ID_RE,
     ARTIFACT_ROLE_RE,
@@ -65,6 +67,7 @@ from .store import (
     write_mutated_state,
 )
 from .timeutils import next_state_timestamp
+from .trace import build_trace_summary, query_trace
 
 
 def cmd_init(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
@@ -527,6 +530,50 @@ def _record_gate_reopen(
     return identifier, cascaded
 
 
+def _emit_artifact_result(
+    args: argparse.Namespace,
+    *,
+    result: str,
+    stage: str,
+    role: str,
+    artifact_id: str,
+    revision: dict[str, Any],
+) -> None:
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "output_schema_version": "1.0",
+                    "result": result,
+                    "artifact": {
+                        "stage": stage,
+                        "role": role,
+                        "artifact_id": artifact_id,
+                        **revision,
+                    },
+                    "artifact_ref": {
+                        "label": f"artifacts.{stage}.{role}.{artifact_id}",
+                        "artifact_id": artifact_id,
+                        **revision,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    if result == "already_registered":
+        print(
+            f"artifact already registered: {stage}.{role} {artifact_id} "
+            f"r{revision['revision']} {revision['content_hash']}"
+        )
+        return
+    print(
+        f"registered artifact: {stage}.{role} {artifact_id} r{revision['revision']} "
+        f"{revision['content_hash']} snapshot={revision['snapshot_path']}"
+    )
+
+
 def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
     state = load_state(root)
     require_compatible_state(state, policy)
@@ -538,6 +585,29 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         raise ResearchCtlError(
             "state is invalid; run `researchctl doctor`: "
             + "; ".join(structural_errors[:3])
+        )
+    # A new revision is allowed to extend only the immutable history that was
+    # actually registered. Record and adapter validators replay historical
+    # snapshots, so accepting a semantically valid but hash-tampered snapshot
+    # here would let the next append legitimize forged history. Validate every
+    # snapshot while deliberately ignoring live-source drift: a dirty artifact
+    # bound by an approved Gate must still reach the specific reopen diagnostic
+    # below, and an unbound dirty source is precisely how a new revision begins.
+    snapshot_errors: list[str] = []
+    ignored_source_warnings: list[str] = []
+    validate_artifact_registry(
+        root,
+        state.get("artifacts"),
+        state,
+        policy,
+        snapshot_errors,
+        ignored_source_warnings,
+        verify_integrity=True,
+    )
+    if snapshot_errors:
+        raise ResearchCtlError(
+            "state is invalid; run `researchctl doctor`: "
+            + "; ".join(snapshot_errors[:3])
         )
 
     stage = args.stage or state.get("current_stage")
@@ -587,9 +657,13 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         )
         if integrity_errors:
             raise ResearchCtlError("; ".join(integrity_errors))
-        print(
-            f"artifact already registered: {stage}.{role} {artifact_id} "
-            f"r{current['revision']} {content_hash}"
+        _emit_artifact_result(
+            args,
+            result="already_registered",
+            stage=stage,
+            role=role,
+            artifact_id=artifact_id,
+            revision=current,
         )
         return 0
     if existing is not None and current is None:
@@ -680,9 +754,13 @@ def cmd_artifact(root: Path, policy: Policy, args: argparse.Namespace) -> int:
         revisions.append(revision)
         existing["current_revision"] = next_revision
     write_mutated_state(root, state)
-    print(
-        f"registered artifact: {stage}.{role} {artifact_id} r{next_revision} "
-        f"{content_hash} snapshot={snapshot_path}"
+    _emit_artifact_result(
+        args,
+        result="registered",
+        stage=stage,
+        role=role,
+        artifact_id=artifact_id,
+        revision=revision,
     )
     for warning in adapter_warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -1051,32 +1129,119 @@ def cmd_checkpoint(root: Path, policy: Policy, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_doctor(root: Path, policy: Policy, _args: argparse.Namespace) -> int:
-    state_path = root / STATE_RELATIVE_PATH
-    if not state_path.is_file():
-        print(f"[ERROR] missing {STATE_RELATIVE_PATH}; run `researchctl init`")
-        print("doctor: 1 error(s), 0 warning(s)")
-        return 1
-    try:
-        state = load_state(root)
-    except ResearchCtlError as exc:
-        print(f"[ERROR] {exc}")
-        print("doctor: 1 error(s), 0 warning(s)")
-        return 1
-    if state.get("schema_version") != policy.schema_version:
+def _emit_doctor_result(
+    args: argparse.Namespace,
+    *,
+    errors: list[str],
+    warnings: list[str],
+) -> int:
+    if bool(getattr(args, "json", False)):
         print(
-            "[ERROR] unsupported state schema_version "
-            f"{state.get('schema_version')!r}; v2 requires {policy.schema_version!r}; "
-            f"{CLEAN_BREAK_REINIT_GUIDANCE}"
+            json.dumps(
+                {
+                    "output_schema_version": "1.0",
+                    "valid": not errors,
+                    "error_count": len(errors),
+                    "warning_count": len(warnings),
+                    "errors": errors,
+                    "warnings": warnings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         )
-        print("doctor: 1 error(s), 0 warning(s)")
-        return 1
-    errors, warnings = validate_state(root, state, policy)
+        return 1 if errors else 0
     for error in errors:
         print(f"[ERROR] {error}")
     for warning in warnings:
         print(f"[WARNING] {warning}")
     if not errors:
-        print("[OK] active v2 state, Gate, revision, snapshot, and workspace contracts are valid")
+        print(
+            "[OK] active v2 state, Gate, revision, snapshot, and workspace "
+            "contracts are valid"
+        )
     print(f"doctor: {len(errors)} error(s), {len(warnings)} warning(s)")
     return 1 if errors else 0
+
+
+def cmd_doctor(root: Path, policy: Policy, args: argparse.Namespace) -> int:
+    state_path = root / STATE_RELATIVE_PATH
+    if not state_path.is_file():
+        return _emit_doctor_result(
+            args,
+            errors=[f"missing {STATE_RELATIVE_PATH}; run `researchctl init`"],
+            warnings=[],
+        )
+    try:
+        state = load_state(root)
+    except ResearchCtlError as exc:
+        return _emit_doctor_result(args, errors=[str(exc)], warnings=[])
+    if state.get("schema_version") != policy.schema_version:
+        return _emit_doctor_result(
+            args,
+            errors=[
+                "unsupported state schema_version "
+                f"{state.get('schema_version')!r}; v2 requires "
+                f"{policy.schema_version!r}; {CLEAN_BREAK_REINIT_GUIDANCE}"
+            ],
+            warnings=[],
+        )
+    errors, warnings = validate_state(root, state, policy)
+    return _emit_doctor_result(
+        args,
+        errors=errors,
+        warnings=warnings,
+    )
+
+
+def cmd_trace(root: Path, policy: Policy, args: argparse.Namespace) -> int:
+    """Emit a deterministic record projection without persisting an index."""
+
+    state = load_state(root)
+    require_compatible_state(state, policy)
+    errors, _warnings = validate_state(
+        root,
+        state,
+        policy,
+        verify_artifact_integrity=True,
+    )
+    if errors:
+        raise ResearchCtlError(
+            "state is invalid; run `researchctl doctor`: " + "; ".join(errors[:3])
+        )
+    inspection = inspect_record_manifests(root, state, policy)
+    if args.record_id is None:
+        result = {
+            "output_schema_version": "1.0",
+            "query": None,
+            "summary": build_trace_summary(inspection),
+            "nodes": list(inspection.nodes),
+            "edges": list(inspection.edges),
+        }
+    else:
+        result = {
+            "output_schema_version": "1.0",
+            "query": query_trace(
+                inspection,
+                args.record_id,
+                direction=args.direction,
+                depth=args.depth,
+            ),
+            "summary": build_trace_summary(inspection),
+        }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_audit(root: Path, policy: Policy, args: argparse.Namespace) -> int:
+    """Export or verify the deterministic offline evidence bundle."""
+
+    if args.audit_action == "export":
+        state = load_state(root)
+        require_compatible_state(state, policy)
+        result = export_bundle(root, state, policy, Path(args.output))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    report = verify_bundle(Path(args.bundle), expected_root=args.expected_root)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["valid"] else 1

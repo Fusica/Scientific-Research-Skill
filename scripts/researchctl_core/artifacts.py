@@ -6,7 +6,8 @@ import hashlib
 import os
 import re
 import stat
-import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,6 +29,15 @@ from .policy import mutable_after_approval_roles
 from .timeutils import valid_timestamp
 
 
+@dataclass(frozen=True)
+class SnapshotCreation:
+    """Result of an immutable no-replace snapshot publication."""
+
+    stored_path: str
+    created: bool
+    identity: tuple[int, int] | None
+
+
 def resolve_artifact_path(root: Path, value: str) -> Path:
     try:
         candidate = Path(value).expanduser()
@@ -47,36 +57,29 @@ def stored_artifact_path(root: Path, path: Path) -> tuple[str, bool]:
         return str(path), True
 
 
-def hash_file_with_size(
-    path: Path, *, max_bytes: int | None = None
+def _hash_open_regular(
+    descriptor: int, path: Path, *, max_bytes: int | None = None
 ) -> tuple[str, int]:
-    """Hash a stable regular file and return its digest and byte count."""
-
     digest = hashlib.sha256()
     size = 0
-    try:
-        with path.open("rb") as stream:
-            before = os.fstat(stream.fileno())
-            if not stat.S_ISREG(before.st_mode):
-                raise ResearchCtlError(f"artifact path must be a regular file: {path}")
-            if max_bytes is not None and before.st_size > max_bytes:
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ResearchCtlError(f"artifact path must be a regular file: {path}")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ResearchCtlError(
+                f"artifact is {before.st_size} bytes; snapshot limit is "
+                f"{max_bytes} bytes. Register a small manifest for large outputs"
+            )
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if max_bytes is not None and size + len(block) > max_bytes:
                 raise ResearchCtlError(
-                    f"artifact is {before.st_size} bytes; snapshot limit is "
-                    f"{max_bytes} bytes. Register a small manifest for large outputs"
+                    f"artifact grew beyond the {max_bytes}-byte snapshot limit; "
+                    "register a small manifest for large outputs"
                 )
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                if max_bytes is not None and size + len(block) > max_bytes:
-                    raise ResearchCtlError(
-                        f"artifact grew beyond the {max_bytes}-byte snapshot limit; "
-                        "register a small manifest for large outputs"
-                    )
-                digest.update(block)
-                size += len(block)
-            after = os.fstat(stream.fileno())
-    except ResearchCtlError:
-        raise
-    except OSError as exc:
-        raise ResearchCtlError(f"cannot hash artifact file {path}: {exc}") from exc
+            digest.update(block)
+            size += len(block)
+        after = os.fstat(stream.fileno())
     identity_before = (
         before.st_dev,
         before.st_ino,
@@ -96,6 +99,25 @@ def hash_file_with_size(
             f"artifact file changed while it was being hashed: {path}; retry"
         )
     return f"sha256:{digest.hexdigest()}", size
+
+
+def hash_file_with_size(
+    path: Path, *, max_bytes: int | None = None
+) -> tuple[str, int]:
+    """Hash a stable regular file and return its digest and byte count."""
+
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        return _hash_open_regular(descriptor, path, max_bytes=max_bytes)
+    except ResearchCtlError:
+        raise
+    except OSError as exc:
+        raise ResearchCtlError(f"cannot hash artifact file {path}: {exc}") from exc
 
 
 def sha256_file(path: Path) -> str:
@@ -217,20 +239,126 @@ def _snapshot_destination(
     return destination
 
 
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":  # pragma: no cover - platform-specific durability
+def revision_snapshot_destination(
+    root: Path,
+    policy: Policy,
+    *,
+    source: Path,
+    stage: str,
+    role: str,
+    artifact_id: str,
+    revision: int,
+    content_hash: str,
+) -> Path:
+    """Return the deterministic snapshot destination for one revision."""
+
+    return _snapshot_destination(
+        root,
+        policy,
+        source=source,
+        stage=stage,
+        role=role,
+        artifact_id=artifact_id,
+        revision=revision,
+        content_hash=content_hash,
+    )
+
+
+@contextmanager
+def _snapshot_parent_descriptor(
+    root: Path, policy: Policy, destination: Path
+) -> Iterable[int | None]:
+    """Yield an anchored parent descriptor and durably create missing levels."""
+
+    snapshot_root = resolved_snapshot_root(root, policy)
+    relative = destination.parent.relative_to(snapshot_root)
+    if os.name == "nt":  # pragma: no cover - Windows lacks the dir_fd contract
+        cursor = snapshot_root
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ResearchCtlError(
+                    f"snapshot parent cannot be a symlink: {cursor}"
+                )
+            try:
+                cursor.mkdir()
+            except FileExistsError:
+                if cursor.is_symlink() or not cursor.is_dir():
+                    raise ResearchCtlError(
+                        f"snapshot parent is not a directory: {cursor}"
+                    )
+        yield None
         return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    current_fd: int | None = None
     try:
-        directory_fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError:
-        pass
+        current_fd = os.open(snapshot_root.resolve(strict=True), flags)
+        if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
+            raise ResearchCtlError(
+                f"snapshot root is not a directory: {snapshot_root}"
+            )
+        for part in relative.parts:
+            try:
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                created = False
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current_fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                if created:
+                    os.fsync(current_fd)
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                os.close(child_fd)
+                raise ResearchCtlError(
+                    f"snapshot parent is not a directory: {destination.parent}"
+                )
+            os.close(current_fd)
+            current_fd = child_fd
+        yield current_fd
+    except ResearchCtlError:
+        raise
+    except OSError as exc:
+        raise ResearchCtlError(
+            f"cannot safely create snapshot parent {destination.parent}: {exc}"
+        ) from exc
+    finally:
+        if current_fd is not None:
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
 
 
-def create_revision_snapshot(
+def _snapshot_stat(parent_fd: int | None, destination: Path) -> os.stat_result:
+    if parent_fd is None:  # pragma: no cover - Windows fallback
+        return destination.lstat()
+    return os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def _open_snapshot_path(parent_fd: int | None, destination: Path, flags: int) -> int:
+    if parent_fd is None:  # pragma: no cover - Windows fallback
+        return os.open(destination, flags, 0o600)
+    return os.open(destination.name, flags, 0o600, dir_fd=parent_fd)
+
+
+def _hash_snapshot_path(
+    parent_fd: int | None, destination: Path
+) -> tuple[str, int]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = _open_snapshot_path(parent_fd, destination, flags)
+    return _hash_open_regular(descriptor, destination)
+
+
+def create_revision_snapshot_result(
     root: Path,
     policy: Policy,
     *,
@@ -241,8 +369,12 @@ def create_revision_snapshot(
     revision: int,
     expected_hash: str,
     expected_size: int,
-) -> str:
-    """Atomically store and reverify one complete immutable revision snapshot."""
+) -> SnapshotCreation:
+    """Store a snapshot without replacement and report whether this call created it.
+
+    The final path can be visible while its exclusively created inode is filled;
+    state never references it until the completed bytes have been reverified.
+    """
 
     if expected_size > MAX_SNAPSHOT_BYTES:
         raise ResearchCtlError(
@@ -263,34 +395,78 @@ def create_revision_snapshot(
     if external:
         raise ResearchCtlError("snapshot destination is outside the project")
 
-    if destination.exists():
-        if not destination.is_file():
-            raise ResearchCtlError(
-                f"snapshot destination is not a regular file: {stored_destination}"
-            )
-        actual_hash, actual_size = hash_file_with_size(destination)
-        if (actual_hash, actual_size) != (expected_hash, expected_size):
-            raise ResearchCtlError(
-                f"existing immutable snapshot conflicts with revision r{revision}: "
-                f"{stored_destination}"
-            )
-        return stored_destination
-
-    temporary_name: str | None = None
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
         if not _path_within(destination.parent, resolved_snapshot_root(root, policy)):
             raise ResearchCtlError("snapshot directory escapes snapshot_root")
-        with source.open("rb") as input_stream:
-            before = os.fstat(input_stream.fileno())
-            with tempfile.NamedTemporaryFile(
-                mode="w+b",
-                dir=destination.parent,
-                prefix=f".{destination.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as output_stream:
-                temporary_name = output_stream.name
+        with _snapshot_parent_descriptor(root, policy, destination) as parent_fd:
+            try:
+                existing_stat = _snapshot_stat(parent_fd, destination)
+            except FileNotFoundError:
+                existing_stat = None
+            if existing_stat is not None:
+                if not stat.S_ISREG(existing_stat.st_mode):
+                    raise ResearchCtlError(
+                        "snapshot destination is not a regular file: "
+                        f"{stored_destination}"
+                    )
+                actual_hash, actual_size = _hash_snapshot_path(
+                    parent_fd, destination
+                )
+                if (actual_hash, actual_size) != (expected_hash, expected_size):
+                    raise ResearchCtlError(
+                        "existing immutable snapshot conflicts with revision "
+                        f"r{revision}: {stored_destination}"
+                    )
+                return SnapshotCreation(
+                    stored_path=stored_destination,
+                    created=False,
+                    identity=None,
+                )
+
+            try:
+                output_fd = _open_snapshot_path(
+                    parent_fd,
+                    destination,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileExistsError:
+                existing_hash, existing_size = _hash_snapshot_path(
+                    parent_fd, destination
+                )
+                if (existing_hash, existing_size) != (expected_hash, expected_size):
+                    raise ResearchCtlError(
+                        f"immutable snapshot appeared with conflicting content: "
+                        f"{stored_destination}"
+                    )
+                return SnapshotCreation(
+                    stored_path=stored_destination,
+                    created=False,
+                    identity=None,
+                )
+            output_stat = os.fstat(output_fd)
+            created_identity = (output_stat.st_dev, output_stat.st_ino)
+            try:
+                source_fd = os.open(
+                    source,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                )
+            except OSError:
+                os.close(output_fd)
+                raise
+            with (
+                os.fdopen(source_fd, "rb") as input_stream,
+                os.fdopen(output_fd, "wb") as output_stream,
+            ):
+                before = os.fstat(input_stream.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise ResearchCtlError(
+                        f"snapshot source must be a regular file: {source}"
+                    )
                 digest = hashlib.sha256()
                 copied = 0
                 while True:
@@ -306,63 +482,80 @@ def create_revision_snapshot(
                     digest.update(block)
                 output_stream.flush()
                 os.fsync(output_stream.fileno())
-            after = os.fstat(input_stream.fileno())
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        copied_hash = f"sha256:{digest.hexdigest()}"
-        if identity_before != identity_after:
-            raise ResearchCtlError(
-                f"artifact changed while its snapshot was being created: {source}; retry"
+                after = os.fstat(input_stream.fileno())
+            identity_before = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
             )
-        if (copied_hash, copied) != (expected_hash, expected_size):
-            raise ResearchCtlError(
-                f"artifact changed before its snapshot was created: {source}; retry"
+            identity_after = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
             )
-        try:
-            # The temporary file is complete and fsynced. A same-directory hard
-            # link publishes it atomically without ever replacing an immutable
-            # snapshot that another process may have created concurrently.
-            os.link(temporary_name, destination)
-        except FileExistsError:
-            existing_hash, existing_size = hash_file_with_size(destination)
-            if (existing_hash, existing_size) != (expected_hash, expected_size):
+            copied_hash = f"sha256:{digest.hexdigest()}"
+            if identity_before != identity_after:
                 raise ResearchCtlError(
-                    f"immutable snapshot appeared with conflicting content: "
+                    f"artifact changed while its snapshot was being created: "
+                    f"{source}; retry"
+                )
+            if (copied_hash, copied) != (expected_hash, expected_size):
+                raise ResearchCtlError(
+                    f"artifact changed before its snapshot was created: {source}; retry"
+                )
+            published_stat = _snapshot_stat(parent_fd, destination)
+            if (published_stat.st_dev, published_stat.st_ino) != created_identity:
+                raise ResearchCtlError(
+                    "snapshot destination identity changed while being written"
+                )
+            if parent_fd is not None:
+                os.fsync(parent_fd)
+            actual_hash, actual_size = _hash_snapshot_path(parent_fd, destination)
+            if (actual_hash, actual_size) != (expected_hash, expected_size):
+                raise ResearchCtlError(
+                    "snapshot verification failed before state update: "
                     f"{stored_destination}"
                 )
-        else:
-            Path(temporary_name).unlink()
-            temporary_name = None
-        _fsync_directory(destination.parent)
     except ResearchCtlError:
         raise
     except OSError as exc:
         raise ResearchCtlError(f"cannot create immutable snapshot: {exc}") from exc
-    finally:
-        if temporary_name is not None:
-            try:
-                Path(temporary_name).unlink()
-            except OSError:
-                pass
+    return SnapshotCreation(
+        stored_path=stored_destination,
+        created=True,
+        identity=created_identity,
+    )
 
-    actual_hash, actual_size = hash_file_with_size(destination)
-    if (actual_hash, actual_size) != (expected_hash, expected_size):
-        raise ResearchCtlError(
-            f"snapshot verification failed before state update: {stored_destination}"
-        )
-    return stored_destination
+
+def create_revision_snapshot(
+    root: Path,
+    policy: Policy,
+    *,
+    source: Path,
+    stage: str,
+    role: str,
+    artifact_id: str,
+    revision: int,
+    expected_hash: str,
+    expected_size: int,
+) -> str:
+    """Compatibility wrapper returning the stored snapshot path."""
+
+    return create_revision_snapshot_result(
+        root,
+        policy,
+        source=source,
+        stage=stage,
+        role=role,
+        artifact_id=artifact_id,
+        revision=revision,
+        expected_hash=expected_hash,
+        expected_size=expected_size,
+    ).stored_path
 
 
 def current_artifact_revision(entry: Any) -> dict[str, Any] | None:

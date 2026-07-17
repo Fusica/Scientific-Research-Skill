@@ -249,6 +249,8 @@ test("terminal lifecycle permits audit and explicit reopen but blocks research m
     ["Bash", { command: "touch notes.md" }],
     ["Bash", { command: "torchrun train.py" }],
     ["researchctl:checkpoint", { summary: "not allowed" }],
+    ["researchctl:record", { action: "append" }],
+    ["Bash", { command: "researchctl record append --stage idea --path records.json --artifact-id R --record item.json" }],
     ["Bash", { command: "researchctl status && touch bypass.txt" }],
     ["Bash", { command: "git commit -m status" }],
     ["Bash", { command: "git push origin show" }],
@@ -273,6 +275,9 @@ test("terminal lifecycle permits audit and explicit reopen but blocks research m
     "researchctl status --json",
     "researchctl doctor",
     "researchctl dashboard",
+    "researchctl trace CLAIM-001 --direction upstream --depth 2",
+    "researchctl audit export --output ../terminal-audit.tar",
+    "researchctl audit verify ../terminal-audit.tar --expected-root sha256:deadbeef",
     "researchctl disable --reason 'manual escape'",
     "researchctl lifecycle reopen --reason x --supporting-evidence-id E --decision-condition C",
   ]) {
@@ -281,6 +286,10 @@ test("terminal lifecycle permits audit and explicit reopen but blocks research m
       tool_input: { command: commandText },
     }), {}, commandText);
   }
+  assert.match(denyReason(runHook("PreToolUse", fixture.project, {
+    tool_name: "Bash",
+    tool_input: { command: "researchctl audit rewrite --output forbidden.tar" },
+  })), /lifecycle|terminal|reopen/i);
 
   const invalid = loadState(fixture);
   invalid.lifecycle.status = "unknown";

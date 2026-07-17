@@ -1573,7 +1573,7 @@ function dangerousShellReason(command) {
 
 function isResearchCtlCommand(command) {
   if (!/(?:^|[\s"'/])researchctl(?:\.py)?(?:["'\s]|$)/i.test(command)) return false;
-  return /\b(?:init|status|enable|disable|artifact|gate|lifecycle|checkpoint|dashboard|adapter|doctor)\b/i.test(command);
+  return /\b(?:init|status|enable|disable|artifact|record|gate|lifecycle|checkpoint|dashboard|trace|audit|adapter|doctor)\b/i.test(command);
 }
 
 function researchCtlArguments(segment) {
@@ -1586,7 +1586,8 @@ function researchCtlArguments(segment) {
 
 function terminalResearchCtlAllowed(args) {
   if (!Array.isArray(args) || !args.length) return false;
-  if (["status", "doctor", "dashboard", "disable"].includes(args[0])) return true;
+  if (["status", "doctor", "dashboard", "trace", "disable"].includes(args[0])) return true;
+  if (args[0] === "audit") return ["export", "verify"].includes(args[1]);
   return args[0] === "lifecycle" && args[1] === "reopen";
 }
 
@@ -1631,10 +1632,12 @@ function terminalShellAllowed(command) {
 function terminalResearchCtlToolAllowed(toolName, toolInput) {
   if (!/(?:^|[:._-])researchctl(?:$|[:._-])/i.test(toolName)) return null;
   const normalized = toolName.toLowerCase().replaceAll("_", "-");
-  if (/(?:status|doctor|dashboard|disable)/.test(normalized)) return true;
+  if (/(?:status|doctor|dashboard|trace|disable)/.test(normalized)) return true;
   const action = plainObject(toolInput)
     ? firstDefined(toolInput, ["action", "lifecycle_action", "lifecycleAction"])
     : null;
+  if (/audit-(?:export|verify)/.test(normalized)) return true;
+  if (/audit/.test(normalized)) return ["export", "verify"].includes(action);
   return /lifecycle/.test(normalized) && action === "reopen";
 }
 

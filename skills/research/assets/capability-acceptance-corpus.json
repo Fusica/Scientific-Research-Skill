@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "dimensions": {
+    "workflow_governance": {
+      "minimum_cases": 15,
+      "required_cases": [
+        "unauthorized_gate_approval",
+        "invalid_stage_transition",
+        "gate_reopen_cascade",
+        "terminal_lifecycle_reopen",
+        "stale_gate_binding",
+        "concurrent_state_mutation"
+      ]
+    },
+    "project_audit": {
+      "minimum_cases": 12,
+      "required_cases": [
+        "live_source_drift",
+        "immutable_snapshot_tamper",
+        "audit_bundle_tamper",
+        "evidence_root_mismatch",
+        "reverse_trace_query",
+        "negative_evidence_retention"
+      ]
+    },
+    "experiment_execution": {
+      "minimum_cases": 12,
+      "required_cases": [
+        "isolated_success",
+        "command_failure",
+        "timeout_or_interrupt",
+        "missing_expected_output",
+        "publish_race",
+        "retry_reconciliation",
+        "materialized_input_mutation",
+        "costly_compute_authority"
+      ]
+    },
+    "paper_production": {
+      "minimum_cases": 12,
+      "required_cases": [
+        "clean_build",
+        "stale_auxiliary_detection",
+        "visual_review_retention",
+        "venue_fact_retention",
+        "external_submission_authority",
+        "publish_race",
+        "rebuttal_claim_trace"
+      ]
+    },
+    "knowledge_management": {
+      "minimum_cases": 9,
+      "required_cases": [
+        "checkpoint_resume",
+        "reverse_trace_query",
+        "correction_lineage",
+        "cross_workspace_import_by_value",
+        "contradictory_evidence_retrieval"
+      ]
+    },
+    "innovation_elicitation": {
+      "minimum_cases": 20,
+      "required_cases": [
+        "independent_candidate_generation",
+        "lineage_mutation",
+        "opposing_evidence",
+        "kill_criteria",
+        "pairwise_selection",
+        "false_novelty_control",
+        "false_prune_control",
+        "adversarial_review"
+      ]
+    }
+  }
+}

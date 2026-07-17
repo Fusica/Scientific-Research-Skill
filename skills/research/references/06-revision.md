@@ -14,6 +14,8 @@ Give material review and change records stable IDs. If a prior mapping or judgme
 
 Preserve editor/reviewer hierarchy and verbatim wording. Give each comment a stable ID, split compound comments into atomic concerns, and classify each concern. Separate summary or praise from actionable feedback. For each atomic concern, identify both the surface request and the underlying question whose answer could change the reviewer's judgment. Record its evidence, affected claims and locations, required versus optional action, missing human input, and verification test.
 
+Retain or refresh the source-cited Venue Profile in `revision.release_checklist` for the named revision round. Record its sources, retrieval date, version or content Hash, applicability, conflicts, and unknowns. Do not assume that an initial-submission rule or an Adapter's cached venue fact still applies to a revision.
+
 ## Maintain the review map
 
 Use an entry such as:
@@ -58,6 +60,22 @@ release_checks:
   numbers_verified: false
   citations_verified: false
   claim_strength_verified: false
+verification_records:
+  - verification_id: REV-VERIFY-001
+    change_ids: []
+    source_artifact_refs: []
+    manuscript_diff_ref: ""
+    manuscript_locations: []
+    response_locations: []
+    checks:
+      - check_id: REV-CHECK-001
+        class: researcher_review # mechanical | researcher_review | venue_fact
+        subject: manuscript_response_consistency
+        status: pending # pending | pass | fail | not_applicable
+        performed_by: ""
+        evidence_refs: []
+        finding: ""
+        disposition: ""
 ```
 
 Use `required`, `optional`, or `not_adopted` for necessity and justify non-adoption scientifically, evidentially, by safety, or by scope. Mark `ready` only after applicable checks pass. Link the revision change log to comments, paper changes, claims, experiments, runs, and analyses.
@@ -72,7 +90,9 @@ If `claim_freeze` was approved with `retrospective_revision_import`, treat its p
 
 ## Apply and verify before responding
 
-Apply changes first and verify them from source, diffs, outputs, and rendered documents. Distinguish new changes from existing text and align terminology and numbers across manuscript and response.
+Apply changes first and verify them from source, diffs, outputs, and rendered documents. Materialize the exact registered revised source in a clean isolated working directory and retain the declared build and clean argument vectors, `cwd`, tool versions, logs, output Hashes, and render record. Distinguish new changes from existing text and align claims, terminology, numbers, citations, locations, figures, tables, appendices, and limitations across manuscript and response.
+
+Classify each verification as `mechanical`, `researcher_review`, or `venue_fact` using the Paper-stage meanings. Record its status, tool or reviewer, evidence, finding, and disposition; explicitly disposition every failure and warning. A disposition does not turn a blocking failure into a pass: resolve it, route the affected work upstream, or stop the release. Mechanical source, diff, citation-key, number, anonymization, package, and render checks identify candidates for review but cannot certify scientific support, complete anonymity, visual quality, venue truth, or whether a response actually resolves the reviewer concern.
 
 Write point by point in the original reviewer order. A shared analysis or experiment may be referenced across comments, but each comment still needs a direct answer in its own terms. Use this reasoning order without forcing identical prose:
 
@@ -88,10 +108,10 @@ Tables, figures, and numbers support the answer; they do not constitute it. Stat
 
 ## Audit and release
 
-Check every comment, promised action, number, citation, location, manuscript/response statement, claim boundary, and rendered change against the claim ledger and affected files.
+Check every comment, promised action, number, citation, location, manuscript/response statement, claim boundary, and rendered change against the claim ledger and affected files. For each atomic concern, require a chain from verbatim concern to action, registered source diff, exact manuscript location, response location, decisive evidence, and verification result. This manuscript-response consistency review must fail when a response reports an action before the source and diff show it, or reports a result, number, citation, location, or claim strength that disagrees with the revised manuscript.
 
 Maintain one stable working artifact for each of `revision.revised_manuscript`, `review_map`, `change_log`, `response_document`, `manuscript_diff`, `verification_records`, `rendered_output`, and `release_checklist`, then register their current revisions for the release package. Registration snapshots files, not directories; use a manifest where a role represents a collection.
 
-Use `policy.stages.revision.exit_criteria` and the revision stage's GateRef in `policy.workflow_graph.stage_exit_requirements` as the sole completion, binding, mutability, and reopen contract. After explicit human approval, approve that GateRef through `researchctl` with the policy-required decision review fields. Gate approval does not itself authorize external sending.
+Use `policy.stages.revision.exit_criteria` and the revision stage's GateRef in `policy.workflow_graph.stage_exit_requirements` as the sole completion, binding, mutability, and reopen contract. After explicit human approval, approve that GateRef through `researchctl` with the policy-required decision review fields. Gate approval binds the reviewed revision package and checklist and does not itself authorize external sending; it also does not authenticate the Venue Profile.
 
 If a conforming Adapter performs an external release, first persist a request whose ordered operational inputs exactly equal the approved release package with no extra artifact and whose payload is itself one revision in that package. Record the action-specific human authorization declaration required by `policy.adapter_authority`, run `adapter verify`, then append and register the attempt's first `accepted` receipt before sending. Append later factual receipts in a later exchange revision even when the outcome is failed, cancelled, late, or unknown; they never retroactively authorize the send.

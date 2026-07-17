@@ -54,6 +54,12 @@ that registration succeeds may the Adapter consume the bound immutable snapshots
 and perform the operation outside Core. Later observations are appended and
 registered as superseding receipts for the same attempt. The accepted journal and
 a later observation for that attempt cannot first appear in the same revision.
+The request/receipt append commands serialize supported `researchctl` writers. If
+working exchange bytes are replaced but artifact registration fails, the dirty
+source remains for explicit reconciliation; the command never performs an unsafe
+automatic unlink or restore, and canonical state and prior snapshots remain the
+authority. The state lock is not a filesystem security boundary against a
+non-cooperating same-user process.
 
 This order closes the supported crash window: a crash before the accepted journal
 has no authorized side effect, while a crash after it leaves an active attempt that

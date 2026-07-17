@@ -53,6 +53,7 @@ def validate_state(
     )
     record_inspection = inspect_record_manifests(root, state, policy)
     errors.extend(record_inspection.errors)
+    warnings.extend(record_inspection.warnings)
     adapter_inspection = inspect_adapter_exchanges(root, state, policy)
     errors.extend(adapter_inspection.errors)
     warnings.extend(adapter_inspection.warnings)

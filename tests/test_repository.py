@@ -306,6 +306,141 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertNotIn("--target initial_submission", paper)
         self.assertNotIn("--target revision_rebuttal", revision)
 
+    def test_innovation_and_paper_semantic_contracts_remain_bounded(self) -> None:
+        references = ROOT / "skills/research/references"
+        idea = (references / "01-idea.md").read_text(encoding="utf-8")
+        paper = (references / "05-paper.md").read_text(encoding="utf-8")
+        revision = (references / "06-revision.md").read_text(encoding="utf-8")
+        policy = json.loads((references / "policy.yaml").read_text(encoding="utf-8"))
+        glossary = (ROOT / "decisions/glossary.md").read_text(encoding="utf-8")
+        innovation_adr = (
+            ROOT / "decisions/0005-innovation-protocol-and-evo-acceptance.md"
+        ).read_text(encoding="utf-8")
+        paper_adr = (
+            ROOT / "decisions/0006-reference-paper-production-contract.md"
+        ).read_text(encoding="utf-8")
+        boundary_adr = (
+            ROOT / "decisions/0007-reference-execution-and-acceptance-boundary.md"
+        ).read_text(encoding="utf-8")
+        trace_adr = (
+            ROOT / "decisions/0008-project-local-trace-and-offline-audit.md"
+        ).read_text(encoding="utf-8")
+        innovation_adr_compact = " ".join(innovation_adr.split())
+        paper_adr_compact = " ".join(paper_adr.split())
+
+        for required in (
+            "attempt_budget:",
+            "seed_passes:",
+            "isolation: isolated",
+            "declared_nonisolated",
+            "parent_ids:",
+            "transfer",
+            "assumption_mutation",
+            "mechanism_recombination",
+            "subtraction",
+            "pivot",
+            "position_swap:",
+            "adversarial_reviews:",
+            "repair_or_failure_feedback:",
+            "selector_recommendation:",
+            "not Gate approval",
+            "no Codex-global or implicit cross-workspace memory",
+        ):
+            self.assertIn(required, idea)
+        self.assertIn("at least three seed-generation passes", " ".join(
+            policy["gates"]["idea_freeze"]["approval_requires"]
+        ))
+
+        for required in (
+            "venue_profile:",
+            "source-cited Venue Profile",
+            "command_argv:",
+            "clean_command_argv:",
+            "working_directory:",
+            "clean_isolated_materialization",
+            "tool_versions:",
+            "warning_dispositions:",
+            "class: mechanical",
+            "researcher_review",
+            "venue_fact",
+            "citation support",
+            "complete anonymity",
+            "external submission",
+        ):
+            self.assertIn(required, paper)
+        for required in (
+            "source-cited Venue Profile",
+            "clean isolated working directory",
+            "manuscript_diff_ref:",
+            "manuscript-response consistency",
+            "mechanical",
+            "researcher_review",
+            "venue_fact",
+            "does not itself authorize external sending",
+        ):
+            self.assertIn(required, revision)
+
+        release_requirements = " ".join(
+            policy["gates"]["release"]["approval_requires"]
+        )
+        for required in (
+            "source-cited Venue Profile",
+            "mechanical, researcher-review, and venue-fact",
+            "reviewer-response",
+            "manuscript-diff",
+        ):
+            self.assertIn(required, release_requirements)
+
+        self.assertIn("Status: Accepted", innovation_adr)
+        self.assertIn(
+            "The comparative capability remains Target", innovation_adr_compact
+        )
+        self.assertIn("Status: Accepted", paper_adr)
+        self.assertIn("does not claim that a named adapter", paper_adr_compact)
+        self.assertIn("Status: Accepted", boundary_adr)
+        self.assertIn("scripts/reference_stack.py", boundary_adr)
+        self.assertIn("scripts/validate_acceptance.py", boundary_adr)
+        self.assertIn("public capability ratings remain `Target`", boundary_adr)
+        self.assertIn("Status: Accepted", trace_adr)
+        self.assertIn("supersedes only ADR 0003", trace_adr)
+        self.assertIn("new destination outside the research project", trace_adr)
+        for required in (
+            "**Innovation protocol — current stage semantics**",
+            "**Project-local Trace Graph — current read-only projection**",
+            "**Offline Audit Bundle — current external hand-off**",
+            "**Reference Isolated Command Adapter — current**",
+            "**Reference Paper Adapter — current implementation surface, Target acceptance**",
+            "**Semantic acceptance harness — current maintainer tool**",
+            "**Run Contract — deferred**",
+            "three-experiment Pilot",
+        ):
+            self.assertIn(required, glossary)
+
+    def test_reference_stack_and_acceptance_surfaces_are_shipped(self) -> None:
+        for relative in (
+            "scripts/reference_stack.py",
+            "scripts/capability_acceptance.py",
+            "scripts/validate_acceptance.py",
+            "skills/research/assets/reference-stack-payload.template.json",
+            "decisions/0007-reference-execution-and-acceptance-boundary.md",
+            "decisions/0008-project-local-trace-and-offline-audit.md",
+        ):
+            self.assertTrue((ROOT / relative).is_file(), relative)
+
+        payload = json.loads(
+            (
+                ROOT
+                / "skills/research/assets/reference-stack-payload.template.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["schema_version"], "1.0")
+        self.assertEqual(payload["adapter_kind"], "isolated_command")
+        self.assertIn(
+            payload["operation_kind"],
+            {"experiment_execution", "paper_production"},
+        )
+        self.assertEqual(payload["network"], "declared_disabled")
+
     def test_runtime_rejects_malformed_or_unsupported_machine_contracts(self) -> None:
         canonical = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
 
@@ -620,7 +755,9 @@ class RepositoryContractTest(unittest.TestCase):
             "optional stage record manifest",
             policy["artifact_layout"]["instruction"],
         )
-        self.assertIn("artifact register record_manifest", readme)
+        self.assertIn("researchctl record append", readme)
+        self.assertIn("原子追加一个记录对象", readme)
+        self.assertNotIn("artifact register record_manifest", readme)
         self.assertIn("inspect_record_manifests", records_source)
 
     def test_adapter_exchange_is_an_audited_artifact_not_operation_state(self) -> None:

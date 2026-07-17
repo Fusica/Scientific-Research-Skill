@@ -7,30 +7,26 @@ description: "Operate an explicitly enabled, project-local scientific research w
 
 Operate one recoverable research workflow from project-local state.
 
-## Enter and route
+## Route
 
-1. Resolve the active project root; never search an unrelated parent for research state. Check `<project-root>/.research/state.json` before loading references.
-   - If absent, disabled, invalid, or incompatible, do not apply the workflow. Suggest the corresponding `researchctl init`, `enable --reason "..."`, or `doctor` action; initialize or enable only when authorized.
-   - If lifecycle is terminal, follow `policy.workspace_lifecycle.terminal_access`; do not load a stage execution reference or advance research.
-2. Resolve `<plugin-root>` from this file at `<plugin-root>/skills/research/SKILL.md`. Expand every `researchctl` instruction to `python3 <plugin-root>/scripts/researchctl.py ...`; never assume it is on `PATH`.
-3. Classify the request before loading stage material.
-   - For ordinary code or repository maintenance that neither interprets nor changes research state, research artifacts, evidence, claims, or decisions, do not load a numbered stage reference. Hooks still apply their mechanical protections.
-   - For scientific workflow work, read only the needed slices of `references/policy.yaml`: the relevant transition, current stage, artifact, Gate, lifecycle, and authority contracts. Then read the one reference named by `policy.stages[current_stage].reference` completely. Use another stage only through a policy transition.
-4. Read `.research/memory.md` and registered artifacts only as needed. Memory is navigation, never evidence or approval authority. Read `assets/runtime-contract.json` only when diagnosing or changing machine state/schema behavior.
+1. Check `<project-root>/.research/state.json` before loading references; never search an unrelated parent. If it is absent, disabled, invalid, or incompatible, do not apply the workflow. Suggest `researchctl init`, `enable --reason "..."`, or `doctor`, and mutate activation only when authorized. For a terminal lifecycle, follow `policy.workspace_lifecycle.terminal_access` without loading stage execution material.
+2. Resolve `<plugin-root>` from this file at `<plugin-root>/skills/research/SKILL.md`. Expand every command to `python3 <plugin-root>/scripts/researchctl.py ...`; never assume `researchctl` is on `PATH`.
+3. Classify the request. For ordinary code or repository maintenance that does not interpret or change research state, artifacts, evidence, claims, or decisions, do not load a numbered stage reference. For scientific workflow work, read only the relevant transition, stage, artifact, Gate, lifecycle, and authority slices of `references/policy.yaml`; then read the one reference named by `policy.stages[current_stage].reference` completely. Enter another stage only through a policy transition.
+4. Read `.research/memory.md` and registered artifacts only as needed. Memory navigates; it is never evidence or approval. Read `assets/runtime-contract.json` only for machine-state or schema work.
 
-Load `references/retrospective-revision-import.md` only after the user explicitly requests that policy mode and confirms its eligibility facts.
+Load `references/retrospective-revision-import.md` only after the user requests that mode and confirms its eligibility facts.
 
-## Execute within the boundary
+## Act
 
-- `references/policy.yaml` alone defines workflow, transitions, artifact roles, Gate requirements, approval modes, cascade, lifecycle, and authority. Numbered references describe scientific execution and must not override it.
-- Label evidence, interpretation, assumptions, exploratory findings, and unknowns. Preserve supporting, opposing, failed, null, negative, excluded, and contradictory evidence with reasons. Never fabricate sources, results, metadata, behavior, checks, decisions, or completed actions.
-- Give material research objects stable IDs. Follow `policy.artifact_layout` for stable working files, immutable revisions, snapshots, cardinality, and large-file manifests.
-- Make artifact, Gate, lifecycle, activation, and checkpoint changes only through `researchctl`; never edit control fields directly. Gate and lifecycle decisions require explicit human direction and the structured review fields required by policy. Never infer approval.
-- When evidence invalidates an approved boundary, reopen the earliest affected GateRef named by policy before changing protected material. Let `researchctl` compute downstream cascade and stage movement; do not reconstruct them in prose or state edits.
-- Run `researchctl doctor` before approval. Use `checkpoint` for bounded recovery summaries, and keep `.research/memory.md` limited to durable facts, decisions, failures, open questions, and the next action.
-- For a supported external operation, follow `policy.adapter_authority`: persist an `adapter_exchange` request through `artifact register`, run `adapter verify` for a new attempt, append its first `accepted` receipt, and register that durable journal before any side effect. Only then may the external Adapter consume the bound immutable snapshots and act; append later factual receipts as superseding revisions. A receipt never approves a Gate or scientific claim. Preserve `unknown` and reconcile it before retry unless the registered policy is explicitly idempotent.
-- Do not cross costly, destructive, safety-relevant, hardware, publication, submission, or other external-action boundaries without the authority required by the user and policy.
+- `references/policy.yaml` alone defines workflow, transitions, artifact roles, Gate requirements, approval modes, cascade, lifecycle, and authority. Numbered references describe execution and cannot override it.
+- Distinguish evidence, interpretation, assumptions, exploration, and unknowns. Preserve supporting, opposing, failed, null, negative, excluded, and contradictory evidence with reasons. Never fabricate.
+- Give material objects stable IDs and follow `policy.artifact_layout`. Use `researchctl record append` for typed records, `artifact register` for artifacts, and `trace [record-id]` for the disposable forward/reverse projection; never hand-edit registered prefixes or treat the trace as scientific judgment.
+- Change activation, artifacts, Gates, lifecycle, and checkpoints only through `researchctl`. Human Gate and lifecycle decisions require explicit direction and policy-required review fields; never infer approval. If evidence invalidates an approved boundary, reopen the earliest affected GateRef and let `researchctl` compute cascade and stage movement.
+- Run `doctor` before approval. Use `checkpoint` for bounded recovery, and keep `.research/memory.md` to durable facts, decisions, failures, open questions, and next action.
+- For external operations, follow `policy.adapter_authority`: append requests and receipts atomically, run `researchctl adapter verify` for each new attempt, and register `accepted` before side effects. Consume only bound immutable snapshots; append terminal facts as superseding receipts. Receipts never approve Gates or claims. Reconcile `unknown` before retry unless policy declares idempotency.
+- For researcher-selected `experiment_execution` or `paper_production`, use `assets/reference-stack-payload.template.json` and `<plugin-root>/scripts/reference_stack.py`. Bind publish paths under `.research/artifacts/<stage>/reference-stack/<attempt-id>/`. It journals, materializes every non-payload request input exactly once, runs declared commands, and publishes first-observation-bound outputs, logs, and result in one no-clobber `artifact publish-batch`, then records the terminal receipt. Retries reuse artifact IDs with a fresh path after reconciling `unknown` or crash orphans. It neither enforces network isolation nor certifies review, venue facts, validity, release, or submission; never use it for `external_release`.
+- Do not cross costly, destructive, hardware, safety, publication, submission, or other external-action boundaries without user and policy authority.
 
 ## Hand off
 
-Report the active stage and Gate state, current registered revisions or checks, unsupported or reopened items, and the next smallest action. A stage is complete only when the current policy criteria are satisfied.
+Report stage and Gate state, registered revisions or checks, unsupported or reopened items, and the next smallest action. Use `doctor --json` for machine diagnostics and `audit export` with an externally retained evidence root for offline hand-off. A stage completes only when policy criteria are satisfied.

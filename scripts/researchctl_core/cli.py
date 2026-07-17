@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .commands import (
+    cmd_audit,
     cmd_adapter_verify,
     cmd_artifact,
     cmd_checkpoint,
@@ -15,9 +16,12 @@ from .commands import (
     cmd_init,
     cmd_lifecycle,
     cmd_status,
+    cmd_trace,
     cmd_toggle,
 )
 from .dashboard import cmd_dashboard
+from .manifest_commands import cmd_adapter_append, cmd_record_append
+from .publish import cmd_publish_batch
 from .constants import (
     CLEAN_BREAK_REINIT_GUIDANCE,
     LEGACY_RELATIVE_PATH,
@@ -62,6 +66,41 @@ def build_parser(policy: Policy) -> argparse.ArgumentParser:
     register.add_argument("--artifact-id", required=True, help="stable artifact ID")
     register.add_argument(
         "--stage", help="producer stage; defaults to the current stage"
+    )
+    register.add_argument(
+        "--json", action="store_true", help="emit a versioned machine result"
+    )
+    publish_batch = artifact_actions.add_parser(
+        "publish-batch",
+        help="publish and register one no-clobber Reference Stack artifact batch",
+    )
+    publish_batch.add_argument(
+        "--stage", required=True, help="producer stage for every publication"
+    )
+    publish_batch.add_argument(
+        "--attempt-id", required=True, help="exact Reference Stack attempt ID"
+    )
+    publish_batch.add_argument(
+        "--manifest", required=True, help="strict JSON publication manifest"
+    )
+    publish_batch.add_argument(
+        "--json", action="store_true", help="emit a versioned machine result"
+    )
+
+    record = subparsers.add_parser(
+        "record",
+        help="atomically append one record and register the manifest revision",
+    )
+    record_actions = record.add_subparsers(dest="record_action", required=True)
+    record_append = record_actions.add_parser(
+        "append", help="append one JSON record through the state transaction lock"
+    )
+    record_append.add_argument("--stage", required=True, help="owning stage")
+    record_append.add_argument("--path", required=True, help="manifest working path")
+    record_append.add_argument("--artifact-id", required=True, help="stable manifest ID")
+    record_append.add_argument("--record", required=True, help="JSON file containing one record")
+    record_append.add_argument(
+        "--json", action="store_true", help="emit a versioned machine result"
     )
 
     def add_decision_arguments(command: argparse.ArgumentParser) -> None:
@@ -160,7 +199,42 @@ def build_parser(policy: Policy) -> argparse.ArgumentParser:
         action="store_true",
         help="best-effort open the generated dashboard in the default browser",
     )
-    subparsers.add_parser("doctor", help="validate project state and pointers")
+    doctor = subparsers.add_parser("doctor", help="validate project state and pointers")
+    doctor.add_argument(
+        "--json", action="store_true", help="emit a versioned diagnostic report"
+    )
+    trace = subparsers.add_parser(
+        "trace", help="query the derived project-local scientific record graph"
+    )
+    trace.add_argument("record_id", nargs="?", help="optional record ID to center")
+    trace.add_argument(
+        "--direction",
+        choices=("both", "upstream", "downstream"),
+        default="both",
+        help="edge traversal direction for a record query",
+    )
+    trace.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="maximum relation distance for a record query",
+    )
+    audit = subparsers.add_parser(
+        "audit", help="export or verify a deterministic offline evidence bundle"
+    )
+    audit_actions = audit.add_subparsers(dest="audit_action", required=True)
+    audit_export = audit_actions.add_parser(
+        "export", help="export canonical state and immutable snapshots"
+    )
+    audit_export.add_argument("--output", required=True, help="destination tar path")
+    audit_verify = audit_actions.add_parser(
+        "verify", help="verify a bundle without consulting its source workspace"
+    )
+    audit_verify.add_argument("bundle", help="audit bundle tar path")
+    audit_verify.add_argument(
+        "--expected-root",
+        help="externally retained sha256 evidence root to authenticate against",
+    )
     adapter = subparsers.add_parser(
         "adapter",
         help="verify one registered adapter request before an external dispatch",
@@ -176,6 +250,21 @@ def build_parser(policy: Policy) -> argparse.ArgumentParser:
         "--retry-of-attempt-id",
         help="latest prior attempt ID when verifying a retry",
     )
+    for action, item_flag, item_help in (
+        ("request-append", "--request", "JSON file containing one Adapter Request"),
+        ("receipt-append", "--receipt", "JSON file containing one Adapter Receipt"),
+    ):
+        append = adapter_actions.add_parser(
+            action,
+            help="atomically append and register the Adapter Exchange revision",
+        )
+        append.add_argument("--stage", required=True, help="owning stage")
+        append.add_argument("--path", required=True, help="exchange working path")
+        append.add_argument("--artifact-id", required=True, help="stable exchange ID")
+        append.add_argument(item_flag, required=True, help=item_help)
+        append.add_argument(
+            "--json", action="store_true", help="emit a versioned machine result"
+        )
     return parser
 
 def dispatch_command(
@@ -190,7 +279,11 @@ def dispatch_command(
     if args.command == "disable":
         return cmd_toggle(root, policy, args, enabled=False)
     if args.command == "artifact":
+        if args.artifact_action == "publish-batch":
+            return cmd_publish_batch(root, policy, args)
         return cmd_artifact(root, policy, args)
+    if args.command == "record":
+        return cmd_record_append(root, policy, args)
     if args.command == "gate":
         return cmd_gate(root, policy, args)
     if args.command == "lifecycle":
@@ -201,8 +294,14 @@ def dispatch_command(
         return cmd_dashboard(root, policy, args)
     if args.command == "doctor":
         return cmd_doctor(root, policy, args)
+    if args.command == "trace":
+        return cmd_trace(root, policy, args)
+    if args.command == "audit":
+        return cmd_audit(root, policy, args)
     if args.command == "adapter":
-        return cmd_adapter_verify(root, policy, args)
+        if args.adapter_action == "verify":
+            return cmd_adapter_verify(root, policy, args)
+        return cmd_adapter_append(root, policy, args)
     raise ResearchCtlError(f"unsupported command: {args.command}")
 
 def configure_standard_streams() -> None:
@@ -231,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
             "enable",
             "disable",
             "artifact",
+            "record",
             "gate",
             "lifecycle",
             "checkpoint",

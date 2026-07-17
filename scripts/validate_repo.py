@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from researchctl_core.constants import ResearchCtlError
+from researchctl_core.jsonutil import (
+    DuplicateJsonKeyError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
+)
 from researchctl_core.policy import load_policy as load_runtime_policy
 
 try:
@@ -24,7 +29,9 @@ PLUGIN_NAME = "scientific-research-skill"
 HOOK_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 REQUIRED_CORE_MODULES = {
     "__init__.py",
+    "adapters.py",
     "artifacts.py",
+    "audit_bundle.py",
     "cli.py",
     "commands.py",
     "constants.py",
@@ -34,12 +41,31 @@ REQUIRED_CORE_MODULES = {
     "gate_records.py",
     "gate_validation.py",
     "jsonutil.py",
+    "manifest_commands.py",
+    "publish.py",
     "policy.py",
+    "records.py",
     "runtime_contract.py",
     "state_validation.py",
     "store.py",
     "timeutils.py",
+    "trace.py",
     "workspace_validation.py",
+}
+REQUIRED_PLUGIN_SCRIPTS = {
+    "acceptance_evidence.py",
+    "capability_acceptance.py",
+    "innovation_benchmark.py",
+    "reference_stack.py",
+    "researchctl.py",
+    "validate_acceptance.py",
+    "validate_repo.py",
+}
+REQUIRED_BOUNDARY_DECISIONS = {
+    "0005-innovation-protocol-and-evo-acceptance.md",
+    "0006-reference-paper-production-contract.md",
+    "0007-reference-execution-and-acceptance-boundary.md",
+    "0008-project-local-trace-and-offline-audit.md",
 }
 EXTERNAL_REFERENCE_URLS = (
     "https://github.com/Galaxy-Dawn/claude-scholar",
@@ -47,23 +73,6 @@ EXTERNAL_REFERENCE_URLS = (
     "https://github.com/Yuan1z0825/nature-skills",
     "https://github.com/lingzhi227/agent-research-skills",
 )
-
-
-class DuplicateKeyError(ValueError):
-    pass
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise DuplicateKeyError(f"duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value: str) -> None:
-    raise ValueError(f"non-standard JSON constant {value}")
 
 
 def _display_path(path: Path) -> str:
@@ -75,12 +84,15 @@ def _display_path(path: Path) -> str:
 
 def load_json(path: Path, errors: list[str]) -> Any:
     try:
-        return json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-        )
-    except (OSError, json.JSONDecodeError, DuplicateKeyError, ValueError) as exc:
+        return strict_json_loads(path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        DuplicateJsonKeyError,
+        NonStandardJsonConstantError,
+        RecursionError,
+    ) as exc:
         errors.append(f"{_display_path(path)}: invalid strict JSON: {exc}")
         return None
 
@@ -126,6 +138,12 @@ def validate_skill() -> list[str]:
         "SKILL.md",
         "agents/openai.yaml",
         "assets/memory.template.md",
+        "assets/capability-acceptance-corpus.json",
+        "assets/capability-evidence-pack.template.json",
+        "assets/capability-evidence-result.template.json",
+        "assets/capability-provenance-result.template.json",
+        "assets/capability-invariant-result.template.json",
+        "assets/reference-stack-payload.template.json",
         "assets/runtime-contract.json",
         "assets/state.template.json",
         "references/retrospective-revision-import.md",
@@ -411,6 +429,24 @@ def validate_plugin() -> list[str]:
         errors.append(f"researchctl_core: missing {', '.join(sorted(missing))}")
     if "migration.py" in modules:
         errors.append("researchctl_core: v2 must not ship an automatic migration module")
+    scripts = {
+        item.name for item in (ROOT / "scripts").glob("*.py") if item.is_file()
+    }
+    missing_scripts = REQUIRED_PLUGIN_SCRIPTS - scripts
+    if missing_scripts:
+        errors.append(
+            "scripts: missing plugin entry points "
+            + ", ".join(sorted(missing_scripts))
+        )
+    decisions = {
+        item.name for item in (ROOT / "decisions").glob("*.md") if item.is_file()
+    }
+    missing_decisions = REQUIRED_BOUNDARY_DECISIONS - decisions
+    if missing_decisions:
+        errors.append(
+            "decisions: missing capability boundary ADRs "
+            + ", ".join(sorted(missing_decisions))
+        )
     for legacy in (ROOT / "contracts", ROOT / "profiles"):
         if legacy.exists() and any(legacy.rglob("*")):
             errors.append(f"{legacy.name}: legacy runtime layer must remain removed")
@@ -468,7 +504,8 @@ def main() -> int:
         f"Validated scientific-research-skill {manifest['version']} "
         f"(workflow {policy['workflow_version']}): one Skill, "
         f"{len(stage_order)} stages, {gate_count} Gates, "
-        "v2 revision snapshots, project-local state, and five Hook events."
+        "v2 revision snapshots, project-local trace, offline audit, "
+        "and five Hook events."
     )
     return 0
 

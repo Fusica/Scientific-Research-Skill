@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "artifacts": [
+    {
+      "artifact_id": "EVIDENCE-RESULT-001",
+      "path": "evidence/evidence-result-001.json",
+      "media_type": "application/json",
+      "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0
+    }
+  ]
+}
